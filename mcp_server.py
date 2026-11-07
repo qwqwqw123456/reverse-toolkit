@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Reverse-Toolkit MCP Server v5.0-alpha
+Reverse-Toolkit MCP Server v5.0-beta
 把逆向工具包封装成 AI 可自主调用的 Tool 集合
 """
 import subprocess
 import os
+import json
 from mcp.server.fastmcp import FastMCP
 
 # 初始化 MCP 服务器
@@ -13,6 +14,86 @@ mcp = FastMCP("Reverse-Toolkit")
 
 # 脚本目录（绝对路径，防止工作目录变化导致找不到脚本）
 SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
+
+# ============================================================
+# 全局状态黑板（Global State）
+# AI 只需要 set_sample 一次，后续所有工具自动用这个路径
+# 脱壳后 active_path 自动切换，AI 甚至不需要知道路径变了
+# ============================================================
+_analysis_context = {
+    "original_path": None,
+    "active_path": None,       # 默认指向原始路径，脱壳后指向新路径
+    "metadata": {
+        "shell_detected": None,
+        "risk_level": None,
+        "iocs_count": 0
+    }
+}
+
+
+def _resolve_path(file_path: str = None) -> str:
+    """核心路由函数：如果没传 path，自动使用当前活跃路径"""
+    if file_path:
+        abspath = os.path.abspath(file_path)
+        if not os.path.exists(abspath):
+            raise FileNotFoundError(f"文件不存在: {abspath}")
+        return abspath
+    if _analysis_context["active_path"]:
+        return _analysis_context["active_path"]
+    raise ValueError("未指定文件路径，且当前上下文中没有正在分析的样本。请先调用 set_sample。")
+
+
+@mcp.tool()
+def set_sample(file_path: str) -> str:
+    """
+    设置当前正在分析的样本。调用后，后续所有工具（risk_check, extract_iocs, get_overview 等）
+    将默认分析该文件，不需要重复传路径。
+    
+    使用时机：分析样本的第一步，先锁定目标。
+    
+    参数：
+        file_path: 目标二进制文件的绝对路径
+    返回：
+        确认信息 + 样本基本信息
+    """
+    abspath = os.path.abspath(file_path)
+    if not os.path.exists(abspath):
+        return f"[ERROR] 文件不存在: {abspath}"
+    
+    _analysis_context["original_path"] = abspath
+    _analysis_context["active_path"] = abspath
+    _analysis_context["metadata"] = {
+        "shell_detected": None,
+        "risk_level": None,
+        "iocs_count": 0
+    }
+    
+    size = os.path.getsize(abspath)
+    size_str = f"{size/1024:.1f}K" if size < 1024*1024 else f"{size/1024/1024:.1f}M"
+    
+    return f"✅ 成功锁定目标样本: {os.path.basename(abspath)}\n路径: {abspath}\n大小: {size_str}\n\n接下来的分析将默认针对此文件，无需重复传路径。"
+
+
+@mcp.tool()
+def get_context() -> str:
+    """
+    查看当前分析上下文状态：当前活跃路径、已检测到的壳类型、风险评级等。
+    
+    使用时机：分析了几步之后，想确认当前状态（比如脱壳后路径切到哪了）。
+    """
+    if not _analysis_context["active_path"]:
+        return "当前没有正在分析的样本。请先调用 set_sample。"
+    
+    result = "=== 当前分析上下文 ===\n\n"
+    result += f"原始路径: {_analysis_context['original_path']}\n"
+    result += f"活跃路径: {_analysis_context['active_path']}\n"
+    if _analysis_context["original_path"] != _analysis_context["active_path"]:
+        result += f"  （已脱壳，活跃路径已切换）\n"
+    result += f"\n元数据:\n"
+    for k, v in _analysis_context["metadata"].items():
+        result += f"  {k}: {v}\n"
+    
+    return result
 
 def run_script(script_name: str, args: list, max_output: int = 8000, timeout: int = 600) -> str:
     """统一执行 Shell 脚本并截断输出"""
@@ -52,7 +133,7 @@ def run_script(script_name: str, args: list, max_output: int = 8000, timeout: in
 
 
 @mcp.tool()
-def get_overview(file_path: str) -> str:
+def get_overview(file_path: str = None) -> str:
     """
     快速概览：获取二进制文件的基础信息（文件指纹、熵值、壳检测、可疑字符串分类）。
     
@@ -60,17 +141,19 @@ def get_overview(file_path: str) -> str:
     特点：不跑 Ghidra，速度快（< 1秒），输出简洁。
     
     参数：
-        file_path: 目标二进制文件的绝对路径
+        file_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     返回：
         文件类型、大小、MD5、熵值、是否加壳、可疑字符串分类（URL/IP/敏感信息/执行相关）
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
-    return run_script("overview.sh", [file_path])
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
+    return run_script("overview.sh", [target])
 
 
 @mcp.tool()
-def quick_check(file_path: str) -> str:
+def quick_check(file_path: str = None) -> str:
     """
     快速全景检查：一个命令出全貌，比 overview 更详细。
     
@@ -81,17 +164,19 @@ def quick_check(file_path: str) -> str:
     特点：不跑 Ghidra，速度快，信息密度高。
     
     参数：
-        file_path: 目标二进制文件的绝对路径
+        file_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     返回：
         完整的快速体检报告
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
-    return run_script("toolbox.sh", [file_path], max_output=6000)
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
+    return run_script("toolbox.sh", [target], max_output=6000)
 
 
 @mcp.tool()
-def unpack_binary(file_path: str) -> str:
+def unpack_binary(file_path: str = None) -> str:
     """
     检测并自动脱壳（支持 UPX）。
     
@@ -99,30 +184,68 @@ def unpack_binary(file_path: str) -> str:
     无壳文件请勿调用！如果熵值 < 6.0，说明没有加壳，直接跳过此工具。
     
     使用时机：仅在 get_overview 或 scan_threats 发现高熵（>7.0）或 UPX/加壳特征时调用！
-    注意：传入参数必须是原始加壳文件的路径。
     
     返回：
         脱壳结果 + 脱壳后文件的新路径
     
-    🔴 关键提醒：脱壳成功后，后续所有分析必须使用返回的新文件路径！
-    绝对不要继续用原文件路径分析！
+    🔴 关键提醒：脱壳成功后，后续所有分析工具（extract_iocs/risk_check 等）
+    会自动切换到脱壳后的文件，你不需要手动传新路径！
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
-    result = run_script("unpacker.sh", [file_path])
-    # 尝试提取脱壳后的路径
-    if ".unpacked" in result:
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
+    
+    result = run_script("unpacker.sh", [target])
+    
+    # 解析结构化 JSON 结果
+    try:
+        # 找到 ===RESULT_JSON=== 标记，取后面的 JSON 行
         lines = result.split('\n')
-        for line in lines:
-            if ".unpacked" in line and ('/' in line or '\\' in line):
-                unpacked_path = line.strip()
-                result += f"\n\n{'='*50}\n✅ 脱壳完成！后续分析请使用此路径：\n{unpacked_path}\n{'='*50}"
+        json_start = -1
+        for i, line in enumerate(lines):
+            if '===RESULT_JSON===' in line:
+                json_start = i + 1
                 break
+        
+        if json_start >= 0 and json_start < len(lines):
+            data = json.loads(lines[json_start])
+            
+            # 更新全局状态
+            if data.get("shell_type") and data["shell_type"] != "unknown":
+                _analysis_context["metadata"]["shell_detected"] = data["shell_type"]
+            
+            # 脱壳成功，自动切换活跃路径
+            if data.get("status") == "success" and data.get("unpacked_path"):
+                unpacked = data["unpacked_path"]
+                if os.path.exists(unpacked):
+                    _analysis_context["active_path"] = unpacked
+                    result += f"\n\n{'='*60}\n✅ 脱壳成功！\n壳类型: {data.get('shell_type', 'unknown')}\n置信度: {data.get('confidence', 'unknown')}\n\n🔄 后续工具将自动使用脱壳后的文件:\n   {unpacked}\n   （无需手动传路径，直接调用下一个工具即可）\n{'='*60}"
+                    return result
+            
+            # 检测到壳但脱壳失败
+            if data.get("confidence") in ("high", "medium"):
+                result += f"\n\n⚠️ 检测到壳（{data.get('shell_type', 'unknown')}，置信度 {data.get('confidence')}），但未自动脱壳成功。\n后续分析仍使用原始文件路径。"
+            else:
+                result += f"\n\n🟢 未检测到明显加壳特征，继续使用原始文件分析。"
+    
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        # JSON 解析失败，降级到原来的文本匹配
+        if ".unpacked" in result:
+            lines = result.split('\n')
+            for line in lines:
+                if ".unpacked" in line and ('/' in line or '\\' in line):
+                    unpacked_path = line.strip()
+                    if os.path.exists(unpacked_path):
+                        _analysis_context["active_path"] = unpacked_path
+                        result += f"\n\n✅ 脱壳完成！后续工具将自动使用: {unpacked_path}"
+                    break
+    
     return result
 
 
 @mcp.tool()
-def scan_threats(file_path: str) -> str:
+def scan_threats(file_path: str = None) -> str:
     """
     YARA 恶意特征扫描：检测已知恶意软件家族和可疑特征。
     
@@ -135,17 +258,19 @@ def scan_threats(file_path: str) -> str:
     使用时机：overview 之后，判断样本是否有恶意倾向。
     
     参数：
-        file_path: 目标二进制文件的绝对路径
+        file_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     返回：
         命中的规则列表和严重程度
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
-    return run_script("yara_scan.sh", [file_path])
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
+    return run_script("yara_scan.sh", [target])
 
 
 @mcp.tool()
-def get_strings(file_path: str) -> str:
+def get_strings(file_path: str = None) -> str:
     """
     高级字符串提取：自动分类敏感字符串。
     
@@ -154,17 +279,19 @@ def get_strings(file_path: str) -> str:
     使用时机：overview 之后，想快速找硬编码线索（密码、URL、IP）。
     
     参数：
-        file_path: 目标二进制文件的绝对路径
+        file_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     返回：
         分类后的字符串列表
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
-    return run_script("strings_extract.sh", [file_path])
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
+    return run_script("strings_extract.sh", [target])
 
 
 @mcp.tool()
-def check_imports(file_path: str) -> str:
+def check_imports(file_path: str = None) -> str:
     """
     导入表/导出表分析：列出导入的系统 API，标记敏感/危险函数。
     
@@ -174,17 +301,19 @@ def check_imports(file_path: str) -> str:
     使用时机：快速判断样本调用了哪些系统能力，有没有恶意行为倾向。
     
     参数：
-        file_path: 目标二进制文件的绝对路径
+        file_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     返回：
         导入函数列表 + 敏感 API 标记
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
-    return run_script("imports_exports.sh", [file_path])
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
+    return run_script("imports_exports.sh", [target])
 
 
 @mcp.tool()
-def detect_crypto(file_path: str) -> str:
+def detect_crypto(file_path: str = None) -> str:
     """
     加密算法识别：检测样本中是否内置了加密/解密功能。
     
@@ -194,17 +323,19 @@ def detect_crypto(file_path: str) -> str:
     使用时机：怀疑样本有加密通信或加密存储功能时调用。
     
     参数：
-        file_path: 目标二进制文件的绝对路径
+        file_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     返回：
         检测到的加密算法和库特征
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
-    return run_script("crypto_detect.sh", [file_path])
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
+    return run_script("crypto_detect.sh", [target])
 
 
 @mcp.tool()
-def detect_network(file_path: str) -> str:
+def detect_network(file_path: str = None) -> str:
     """
     网络特征检测：提取样本中的网络相关 IOC。
     
@@ -213,17 +344,19 @@ def detect_network(file_path: str) -> str:
     使用时机：找 C2 服务器地址、端口、域名等威胁情报指标。
     
     参数：
-        file_path: 目标二进制文件的绝对路径
+        file_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     返回：
         URL、IP、域名、网络 API、C2 特征列表
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
-    return run_script("net_detect.sh", [file_path])
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
+    return run_script("net_detect.sh", [target])
 
 
 @mcp.tool()
-def check_antidbg(file_path: str) -> str:
+def check_antidbg(file_path: str = None) -> str:
     """
     反调试/反虚拟机检测：识别样本是否有防调试、防分析手段。
     
@@ -233,23 +366,25 @@ def check_antidbg(file_path: str) -> str:
     使用时机：后续要做动态调试之前，先看看有没有反调试。
     
     参数：
-        file_path: 目标二进制文件的绝对路径
+        file_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     返回：
         检测到的反调试手段和绕过建议
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
-    return run_script("antidbg_check.sh", [file_path])
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
+    return run_script("antidbg_check.sh", [target])
 
 
 @mcp.tool()
-def focus_on_function(binary_path: str, keyword: str) -> str:
+def focus_on_function(keyword: str, binary_path: str = None) -> str:
     """
     聚焦深挖：针对特定关键词，提取相关函数的伪代码。
     
     参数：
-        binary_path: 目标二进制文件的绝对路径
         keyword: 搜索关键词，可以是函数名（如 "system"）、字符串（如 "http://"）、API 名（如 "CreateProcess"）
+        binary_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     
     使用时机：overview 和 strings 分析发现可疑点后，深挖具体实现。
     特点：跑 Ghidra 反编译，只提取相关函数，速度比 full_analysis 快。
@@ -257,13 +392,15 @@ def focus_on_function(binary_path: str, keyword: str) -> str:
     返回：
         包含关键词的函数列表、它们的伪代码预览、交叉引用
     """
-    if not os.path.exists(binary_path):
-        return f"[ERROR] 文件不存在: {binary_path}"
-    return run_script("focus_func.sh", [binary_path, keyword], max_output=10000)
+    try:
+        target = _resolve_path(binary_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
+    return run_script("focus_func.sh", [target, keyword], max_output=10000)
 
 
 @mcp.tool()
-def full_analysis(file_path: str, focus_keyword: str = "") -> str:
+def full_analysis(focus_keyword: str = "", file_path: str = None) -> str:
     """
     完整分析：Ghidra 全量反编译 + 智能降噪 + 结构化 Markdown 报告。
     
@@ -281,21 +418,23 @@ def full_analysis(file_path: str, focus_keyword: str = "") -> str:
     注意：耗时较长（小文件 30s，大文件 1-5 分钟），大文件自动截断防爆。
     
     参数：
-        file_path: 目标二进制文件的绝对路径
         focus_keyword: 可选，聚焦关键词，在报告中插入聚焦检索
+        file_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     返回：
         完整的结构化 Markdown 体检报告
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
-    args = [file_path]
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
+    args = [target]
     if focus_keyword:
         args += ["--focus", focus_keyword]
     return run_script("analyze.sh", args, max_output=15000)
 
 
 @mcp.tool()
-def generate_full_report(file_path: str) -> str:
+def generate_full_report(file_path: str = None) -> str:
     """
     一键生成完整分析报告：汇总所有快速检测结果，自动评级风险。
     
@@ -313,17 +452,19 @@ def generate_full_report(file_path: str) -> str:
     特点：不跑 Ghidra，速度快（< 30 秒），输出结构化 Markdown 报告。
     
     参数：
-        file_path: 目标二进制文件的绝对路径
+        file_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     返回：
         完整的 Markdown 分析报告 + 风险评级
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
-    return run_script("generate_report.py", [file_path], max_output=15000)
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
+    return run_script("generate_report.py", [target], max_output=15000)
 
 
 @mcp.tool()
-def risk_check(file_path: str) -> str:
+def risk_check(file_path: str = None) -> str:
     """
     快速风险评级：自动打分并给出低/中/高/严重四级评级。
     
@@ -337,15 +478,17 @@ def risk_check(file_path: str) -> str:
     特点：速度极快（< 5 秒），只返回评级和理由。
     
     参数：
-        file_path: 目标二进制文件的绝对路径
+        file_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     返回：
         风险等级 + 评分 + 评分依据列表
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
     
     # 文件大小基线：大文件链接的库多，API 检测要降权，防止误报
-    file_size = os.path.getsize(file_path)
+    file_size = os.path.getsize(target)
     if file_size > 1024 * 1024:  # > 1MB
         api_weight = 0.3
         size_note = f"大文件（{file_size//1024}K），API 检测权重已降权"
@@ -357,9 +500,9 @@ def risk_check(file_path: str) -> str:
         size_note = f"小文件（{file_size//1024}K）"
     
     # 调用概览和威胁扫描，然后做简单评分
-    overview = run_script("overview.sh", [file_path], max_output=2000)
-    threats = run_script("yara_scan.sh", [file_path], max_output=1500)
-    imports = run_script("imports_exports.sh", [file_path], max_output=1500)
+    overview = run_script("overview.sh", [target], max_output=2000)
+    threats = run_script("yara_scan.sh", [target], max_output=1500)
+    imports = run_script("imports_exports.sh", [target], max_output=1500)
     
     score = 0
     reasons = []
@@ -386,7 +529,7 @@ def risk_check(file_path: str) -> str:
     imported_funcs = set()
     try:
         result = subprocess.run(
-            ["readelf", "--dyn-syms", "--wide", file_path],
+            ["readelf", "--dyn-syms", "--wide", target],
             capture_output=True, text=True, timeout=10
         )
         for line in result.stdout.split('\n'):
@@ -445,7 +588,7 @@ def risk_check(file_path: str) -> str:
 
 
 @mcp.tool()
-def extract_iocs(file_path: str) -> str:
+def extract_iocs(file_path: str = None) -> str:
     """
     IOC 统一提取：从二进制中提取所有威胁情报指标。
     
@@ -460,18 +603,20 @@ def extract_iocs(file_path: str) -> str:
     特点：速度快，输出结构化，可直接导入 SIEM 或防火墙。
     
     参数：
-        file_path: 目标二进制文件的绝对路径
+        file_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     返回：
         分类整理后的 IOC 列表
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
     
     import re
     
     # 提取所有字符串
-    strings_out = run_script("strings_extract.sh", [file_path], max_output=5000)
-    net_out = run_script("net_detect.sh", [file_path], max_output=2000)
+    strings_out = run_script("strings_extract.sh", [target], max_output=5000)
+    net_out = run_script("net_detect.sh", [target], max_output=2000)
     
     all_text = strings_out + net_out
     
@@ -510,7 +655,7 @@ def extract_iocs(file_path: str) -> str:
 
 
 @mcp.tool()
-def generate_attack_chain(file_path: str) -> str:
+def generate_attack_chain(file_path: str = None) -> str:
     """
     自动生成攻击链 Mermaid 图：根据检测到的特征，还原攻击者行为路径。
     
@@ -526,21 +671,23 @@ def generate_attack_chain(file_path: str) -> str:
     特点：自动根据检测到的特征生成 Mermaid 流程图，可直接粘贴到 Markdown。
     
     参数：
-        file_path: 目标二进制文件的绝对路径
+        file_path: 可选，目标二进制路径。不传则用当前 set_sample 锁定的样本。
     返回：
         Mermaid 格式的攻击链图 + 各阶段检测依据
     """
-    if not os.path.exists(file_path):
-        return f"[ERROR] 文件不存在: {file_path}"
+    try:
+        target = _resolve_path(file_path)
+    except (ValueError, FileNotFoundError) as e:
+        return f"[ERROR] {e}"
     
     import re
     
     # 收集各阶段检测结果
-    overview = run_script("overview.sh", [file_path], max_output=2000)
-    net_out = run_script("net_detect.sh", [file_path], max_output=1500)
-    persist_out = run_script("persist_detect.sh", [file_path], max_output=1500)
-    antidbg_out = run_script("antidbg_check.sh", [file_path], max_output=1500)
-    crypto_out = run_script("crypto_detect.sh", [file_path], max_output=1000)
+    overview = run_script("overview.sh", [target], max_output=2000)
+    net_out = run_script("net_detect.sh", [target], max_output=1500)
+    persist_out = run_script("persist_detect.sh", [target], max_output=1500)
+    antidbg_out = run_script("antidbg_check.sh", [target], max_output=1500)
+    crypto_out = run_script("crypto_detect.sh", [target], max_output=1000)
     
     all_text = overview + net_out + persist_out + antidbg_out + crypto_out
     
@@ -608,7 +755,7 @@ def generate_attack_chain(file_path: str) -> str:
 
 
 if __name__ == "__main__":
-    print("Reverse-Toolkit MCP Server v5.0-alpha 启动中...")
+    print("Reverse-Toolkit MCP Server v5.0-beta 启动中...")
     print(f"脚本目录: {SCRIPTS_DIR}")
-    print(f"工具数量: 15")
+    print(f"工具数量: 17（含 set_sample / get_context 全局状态工具）")
     mcp.run()
