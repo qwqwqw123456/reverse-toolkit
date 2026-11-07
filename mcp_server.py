@@ -14,7 +14,7 @@ mcp = FastMCP("Reverse-Toolkit")
 # 脚本目录（绝对路径，防止工作目录变化导致找不到脚本）
 SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
 
-def run_script(script_name: str, args: list, max_output: int = 8000) -> str:
+def run_script(script_name: str, args: list, max_output: int = 8000, timeout: int = 600) -> str:
     """统一执行 Shell 脚本并截断输出"""
     script_path = os.path.join(SCRIPTS_DIR, script_name)
     if not os.path.exists(script_path):
@@ -31,7 +31,7 @@ def run_script(script_name: str, args: list, max_output: int = 8000) -> str:
     try:
         result = subprocess.run(
             ["bash", script_path] + abs_args,
-            capture_output=True, text=True, timeout=300
+            capture_output=True, text=True, timeout=timeout
         )
         output = result.stdout
         if result.stderr and result.stderr.strip():
@@ -46,7 +46,7 @@ def run_script(script_name: str, args: list, max_output: int = 8000) -> str:
         
         return output
     except subprocess.TimeoutExpired:
-        return f"[TIMEOUT] 执行超时（300s）: {script_name}"
+        return f"[TIMEOUT] 执行超时（{timeout}s）: {script_name}"
     except Exception as e:
         return f"[EXCEPTION] {type(e).__name__}: {str(e)}"
 
@@ -344,6 +344,18 @@ def risk_check(file_path: str) -> str:
     if not os.path.exists(file_path):
         return f"[ERROR] 文件不存在: {file_path}"
     
+    # 文件大小基线：大文件链接的库多，API 检测要降权，防止误报
+    file_size = os.path.getsize(file_path)
+    if file_size > 1024 * 1024:  # > 1MB
+        api_weight = 0.3
+        size_note = f"大文件（{file_size//1024}K），API 检测权重已降权"
+    elif file_size > 100 * 1024:  # > 100K
+        api_weight = 0.6
+        size_note = f"中等文件（{file_size//1024}K），API 检测权重部分降权"
+    else:
+        api_weight = 1.0
+        size_note = f"小文件（{file_size//1024}K）"
+    
     # 调用概览和威胁扫描，然后做简单评分
     overview = run_script("overview.sh", [file_path], max_output=2000)
     threats = run_script("yara_scan.sh", [file_path], max_output=1500)
@@ -351,6 +363,7 @@ def risk_check(file_path: str) -> str:
     
     score = 0
     reasons = []
+    reasons.append(size_note)
     
     # 熵值
     import re
@@ -369,21 +382,42 @@ def risk_check(file_path: str) -> str:
         score += 20
         reasons.append("检测到 UPX 壳")
     
-    # 危险 API
-    dangerous = ["system", "execve", "CreateProcess", "CreateRemoteThread", 
-                 "WriteProcessMemory", "WinExec", "popen"]
-    api_count = sum(1 for api in dangerous if api.lower() in imports.lower())
-    if api_count >= 5:
-        score += 30
-        reasons.append(f"检测到 {api_count} 个高危执行 API")
-    elif api_count >= 2:
-        score += 15
-        reasons.append(f"检测到 {api_count} 个高危执行 API")
+    # 用 readelf 提取真正的动态导入符号（比 grep 字符串准确得多）
+    imported_funcs = set()
+    try:
+        result = subprocess.run(
+            ["readelf", "--dyn-syms", "--wide", file_path],
+            capture_output=True, text=True, timeout=10
+        )
+        for line in result.stdout.split('\n'):
+            parts = line.split()
+            if len(parts) >= 8 and parts[3] == 'FUNC':
+                func_name = parts[7]
+                # 去掉版本后缀（@GLIBC_2.2.5 这种）
+                func_name = func_name.split('@')[0]
+                imported_funcs.add(func_name)
+    except Exception:
+        # readelf 失败就降级到空集合
+        pass
     
-    # 网络
-    if "socket" in imports.lower() or "connect" in imports.lower():
-        score += 10
-        reasons.append("包含网络连接 API")
+    # 危险 API（按文件大小权重降权）
+    dangerous = ["system", "execve", "execl", "execv", "popen"]
+    api_count = sum(1 for api in dangerous if api in imported_funcs)
+    api_score = int(api_count * 10 * api_weight)  # 满分按 api_count*10 算，再乘权重
+    if api_score >= 30:
+        score += 30
+        reasons.append(f"导入表中检测到 {api_count} 个高危执行 API（加权后 {api_score} 分）")
+    elif api_score >= 10:
+        score += api_score
+        reasons.append(f"导入表中检测到 {api_count} 个高危执行 API（加权后 {api_score} 分）")
+    
+    # 网络 API（也看导入表）
+    net_apis = ["socket", "connect", "send", "recv", "gethostbyname"]
+    net_count = sum(1 for api in net_apis if api in imported_funcs)
+    net_score = int(net_count * 3 * api_weight)  # 每个网络 API 3 分
+    if net_score > 0:
+        score += net_score
+        reasons.append(f"导入表中检测到 {net_count} 个网络 API（加权后 {net_score} 分）")
     
     # YARA
     if "critical" in threats.lower():
@@ -510,36 +544,37 @@ def generate_attack_chain(file_path: str) -> str:
     
     all_text = overview + net_out + persist_out + antidbg_out + crypto_out
     
-    # 检测各阶段特征
+    # 检测各阶段特征（严格交叉验证，减少误报）
     stages = []
     
-    # 初始访问：网络特征
-    has_network = bool(re.search(r'http://|https://|socket|connect', all_text, re.I))
-    if has_network:
-        stages.append(("初始访问", "检测到网络通信特征", "#e74c3c"))
+    # 初始访问：要有实际的 URL 或 IP，不能只匹配 socket/connect
+    has_url = bool(re.search(r'https?://[^\s]{5,}', net_out, re.I))
+    has_ip = bool(re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', net_out))
+    if has_url or has_ip:
+        stages.append(("初始访问", "检测到实际 URL/IP 网络地址", "#e74c3c"))
     
-    # 执行：危险执行 API
-    has_exec = bool(re.search(r'system|execve|CreateProcess|WinExec|ShellExecute', all_text, re.I))
-    if has_exec:
-        stages.append(("执行", "检测到命令执行 API", "#f39c12"))
+    # 执行：至少 2 个高危执行 API，不能只匹配 system
+    exec_apis = re.findall(r'\b(system|popen|execve|CreateProcess|WinExec|ShellExecute)\b', all_text, re.I)
+    if len(exec_apis) >= 2:
+        stages.append(("执行", f"检测到 {len(exec_apis)} 个命令执行 API", "#f39c12"))
     
     # 持久化
     has_persist = bool(re.search(r'CurrentVersion\\\\Run|CreateService|StartService|crontab|Startup', all_text, re.I))
     if has_persist:
         stages.append(("持久化", "检测到持久化机制", "#9b59b6"))
     
-    # 权限提升/反调试
-    has_antidbg = bool(re.search(r'IsDebuggerPresent|CheckRemoteDebuggerPresent|CreateToolhelp32Snapshot|VMware|VirtualBox', all_text, re.I))
-    if has_antidbg:
-        stages.append(("防御规避", "检测到反调试/反虚拟机", "#34495e"))
+    # 反调试：至少 2 个反调试特征，不能只匹配一个
+    antidbg_features = re.findall(r'\b(IsDebuggerPresent|CheckRemoteDebuggerPresent|NtQueryInformationProcess|CreateToolhelp32Snapshot|VMware|VirtualBox|vboxservice)\b', all_text, re.I)
+    if len(antidbg_features) >= 2:
+        stages.append(("防御规避", f"检测到 {len(antidbg_features)} 个反调试特征", "#34495e"))
     
     # 命令与控制
     has_c2 = bool(re.search(r'C2|beacon|callback|reverse.*shell|meterpreter|cobalt', all_text, re.I))
     if has_c2:
         stages.append(("命令与控制", "检测到 C2 通信特征", "#e67e22"))
     
-    # 数据窃取/加密
-    has_crypto = bool(re.search(r'AES|RSA|encrypt|decrypt|CryptEncrypt|CryptDecrypt', all_text, re.I))
+    # 数据加密
+    has_crypto = bool(re.search(r'\bAES\b|\bRSA\b|encrypt|decrypt|CryptEncrypt|CryptDecrypt', all_text, re.I))
     if has_crypto:
         stages.append(("数据加密", "检测到加密功能", "#16a085"))
     
