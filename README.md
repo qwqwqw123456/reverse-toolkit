@@ -3,7 +3,7 @@
 > 从 2210 个函数里自动定位漏洞核心，把枯燥的反编译变成可视化的攻击链分析。
 
 ![v4.2-stable](https://img.shields.io/badge/version-v4.2--stable-blue)
-![v5.0-alpha](https://img.shields.io/badge/MCP-v5.0--alpha-orange)
+![v5.0-beta](https://img.shields.io/badge/MCP-v5.0--beta-orange)
 ![Ghidra](https://img.shields.io/badge/Ghidra-12.2-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
@@ -14,12 +14,14 @@
 Reverse-Toolkit 是一个统一的逆向工程工具包，把 Ghidra 反编译引擎与大语言模型（LLM）结合，实现自动化的二进制分析与漏洞挖掘。
 
 **核心能力：**
-- 🤖 **MCP Agent 模式（v5.0）**：11 个工具封装成 MCP Server，AI 自主编排分析流程
+- 🤖 **MCP Agent 模式（v5.0）**：15 个工具封装成 MCP Server，AI 自主编排分析流程
 - 🧠 **智能降噪**：从几千个函数里精准提炼核心业务函数，过滤库函数噪音
 - 📊 **结构化输出**：自动生成 Markdown 体检报告，不是一坨 C 代码
 - 🔄 **渐进式分析**：三轮工作流，先看全貌再决定深挖哪里
 - 🛡️ **防爆防幻觉**：大文件截断 + AI 分析守则，防止 Token 爆炸和胡编乱造
 - 🔽 **优雅降级**：缺 YARA 走 strings 模式，缺 UPX 先分析字符串，环境不完美也能跑
+- 🎯 **风险评级**：自动打分低/中/高/严重，附评分依据
+- 📈 **攻击链可视化**：自动生成 Mermaid 攻击流程图
 
 ---
 
@@ -56,6 +58,48 @@ flowchart TD
 ```
 
 **从 2210 个函数中，自动定位到 Shellshock 漏洞核心函数 `parse_and_execute`，并还原完整攻击链。**
+
+---
+
+## 🤖 AI 自主编排：一句话分析整个样本（v5.0）
+
+**你只需要说一句话：**
+> "帮我分析一下这个样本，提取 IOC，评估风险，生成攻击链报告。"
+
+**AI 会自主决策并调用 15 个工具，完成完整分析：**
+
+| 步骤 | AI 决策 | 调用工具 | 输出 |
+|------|---------|----------|------|
+| 1 | 先快速侦察 | `get_overview` | 发现高熵 7.81 + UPX 特征 |
+| 2 | 确认加壳，脱壳 | `unpack_binary` | 自动脱 UPX 壳，返回新路径 |
+| 3 | 提取威胁情报 | `extract_iocs` | C2 地址、IP、危险 API 清单 |
+| 4 | 检查防御规避 | `check_antidbg` | 检测到反调试 API |
+| 5 | 生成攻击链 | `generate_attack_chain` | 自动输出 Mermaid 攻击链图 |
+| 6 | 风险评级 | `risk_check` | 🔴 严重（85/100）+ 评分依据 |
+| 7 | 完整报告 | `generate_full_report` | 一键输出 Markdown 体检报告 |
+
+**AI 自主调度示例：**
+
+```mermaid
+flowchart TD
+    Start([用户输入: 分析这个样本]) --> Overview[get_overview<br/>发现高熵+UPX]
+    Overview --> Unpack[unpack_binary<br/>自动脱壳]
+    Unpack --> IOCs[extract_iocs<br/>提取威胁指标]
+    IOCs --> AntiDBG[check_antidbg<br/>检测反调试]
+    AntiDBG --> AttackChain[generate_attack_chain<br/>生成攻击链图]
+    AttackChain --> Risk[risk_check<br/>风险评级]
+    Risk --> Report[generate_full_report<br/>完整报告]
+    
+    style Overview fill:#3498db,color:#fff
+    style Unpack fill:#e74c3c,color:#fff
+    style Report fill:#27ae60,color:#fff
+```
+
+**关键特性：**
+- 🧠 **AI 当指挥官**：不用人一步步调工具，大模型自己决定先干嘛后干嘛
+- 🔗 **路径自动继承**：脱壳后的新路径自动传给下一个工具，不会断链
+- 🛡️ **优雅降级**：缺 YARA 走 strings 模式，缺 UPX 先分析字符串
+- 📊 **结构化输出**：所有结果都是 Markdown/IOC JSON，不是一坨日志
 
 ---
 
@@ -121,7 +165,7 @@ pip install mcp
 
 AI 会自主决策：先概览 → 发现加壳 → 自动脱壳 → YARA 扫描 → 深挖函数 → 输出攻击链报告。
 
-**11 个可调用工具：**
+**15 个可调用工具：**
 | 工具 | 用途 |
 |------|------|
 | `get_overview` | 快速概览（第一步必用） |
@@ -135,6 +179,10 @@ AI 会自主决策：先概览 → 发现加壳 → 自动脱壳 → YARA 扫描
 | `check_antidbg` | 反调试检测 |
 | `focus_on_function` | 聚焦深挖特定函数 |
 | `full_analysis` | 完整 Ghidra 反编译 |
+| `generate_full_report` | 一键完整报告（汇总所有检测） |
+| `risk_check` | 快速风险评级 |
+| `extract_iocs` | IOC 统一提取 |
+| `generate_attack_chain` | 攻击链 Mermaid 图 |
 
 ---
 
@@ -199,11 +247,13 @@ bash scripts/focus_func.sh ./target_binary "password"
 ```
 reverse-toolkit/
 ├── SKILL.md                    # 主文档
-├── mcp_server.py              # MCP Server v5.0（11 个 AI 工具）
+├── mcp_server.py              # MCP Server v5.0（15 个 AI 工具）
+├── install.sh                 # 一键安装 + 环境检测
 ├── scripts/
 │   ├── analyze.sh             # 统一入口 + 环境自检
 │   ├── overview.sh            # 第一轮：快速概览
 │   ├── focus_func.sh          # 第二轮：聚焦深挖
+│   ├── generate_report.py     # 自动报告生成 + 风险评级
 │   ├── ExportDecompiled.java  # Ghidra 反编译导出脚本
 │   ├── backends/
 │   │   ├── ghidra.sh          # Ghidra 后端
@@ -241,6 +291,13 @@ reverse-toolkit/
 ---
 
 ## 📝 更新日志
+
+### v5.0-beta
+- MCP 工具升级到 15 个：新增报告生成、风险评级、IOC 提取、攻击链可视化
+- AI 自主编排：一句话完成全流程分析，不用手动调工具
+- 一键安装脚本：自动检测环境并安装依赖
+- 风险自动评级：低/中/高/严重四级，附评分依据
+- 攻击链自动生成：Mermaid 流程图，6 个攻击阶段检测
 
 ### v5.0-alpha
 - MCP Server 封装：11 个工具暴露给 AI 自主调用
