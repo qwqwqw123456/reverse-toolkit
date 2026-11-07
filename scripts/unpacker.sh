@@ -1,12 +1,12 @@
 #!/bin/bash
-# 脱壳分析工具 v2.1 - 三特征交叉验证 + 置信度评分
+# 脱壳分析工具 v2.2 - 三特征交叉验证 + 置信度评分 + JSON结构化输出
 set -e
 
 TARGET="$1"
 OUTPUT_DIR="${2:-$(pwd)/unpack_out_$(date +%s)}"
 mkdir -p "$OUTPUT_DIR"
 
-echo "=== 脱壳分析 v2.1 ==="
+echo "=== 脱壳分析 v2.2 ==="
 echo "目标: $TARGET"
 echo ""
 
@@ -144,3 +144,47 @@ echo "  4. 虚拟机壳：反虚拟化分析，逐条解释"
 
 echo ""
 echo "输出目录: $OUTPUT_DIR"
+
+# ============================================================
+# 结构化 JSON 输出（供 Python MCP 层解析，自动更新状态）
+# ============================================================
+UNPACKED_PATH=""
+STATUS="no_shell"
+SHELL_TYPE="unknown"
+
+# 判断置信度
+if [ "$shell_score" -ge 6 ]; then
+    CONFIDENCE="high"
+elif [ "$shell_score" -ge 3 ]; then
+    CONFIDENCE="medium"
+else
+    CONFIDENCE="low"
+fi
+
+# 判断壳类型
+if strings "$TARGET" 2>/dev/null | grep -q "UPX!"; then
+    SHELL_TYPE="UPX"
+fi
+
+# 检查脱壳是否成功
+if [ -f "$OUTPUT_DIR/$(basename "$TARGET").unpacked" ]; then
+    if upx -t "$OUTPUT_DIR/$(basename "$TARGET").unpacked" >/dev/null 2>&1 || ! strings "$OUTPUT_DIR/$(basename "$TARGET").unpacked" | grep -q "UPX!"; then
+        UNPACKED_PATH="$OUTPUT_DIR/$(basename "$TARGET").unpacked"
+        STATUS="success"
+    fi
+fi
+
+# 输出 JSON（最后一行，Python 层取最后一行解析）
+python3 -c "
+import json
+result = {
+    'status': '$STATUS',
+    'unpacked_path': '$UNPACKED_PATH',
+    'shell_type': '$SHELL_TYPE',
+    'confidence': '$CONFIDENCE',
+    'score': $shell_score,
+    'output_dir': '$OUTPUT_DIR'
+}
+print('===RESULT_JSON===')
+print(json.dumps(result, ensure_ascii=False))
+"
