@@ -2,10 +2,11 @@
 
 > 从 2210 个函数里自动定位漏洞核心，把枯燥的反编译变成可视化的攻击链分析。
 
-![v4.2-stable](https://img.shields.io/badge/version-v4.2--stable-blue)
-![v5.0-beta](https://img.shields.io/badge/MCP-v5.0--beta-orange)
+![CI](https://github.com/qwqwqw123456/reverse-toolkit/actions/workflows/ci.yml/badge.svg)
+![Version](https://img.shields.io/badge/version-v5.0--stable-blue)
+![Docker](https://img.shields.io/badge/docker-ready-brightgreen)
+![MCP](https://img.shields.io/badge/MCP-17--tools-orange)
 ![Ghidra](https://img.shields.io/badge/Ghidra-12.2-green)
-![Unicorn](https://img.shields.io/badge/Unicorn-2.1-purple)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
 ---
@@ -15,7 +16,7 @@
 Reverse-Toolkit 是一个统一的逆向工程工具包，把 Ghidra 反编译引擎与大语言模型（LLM）结合，实现自动化的二进制分析与漏洞挖掘。
 
 **核心能力：**
-- 🤖 **MCP Agent 模式（v5.0）**：15 个工具封装成 MCP Server，AI 自主编排分析流程
+- 🤖 **MCP Agent 模式（v5.0）**：17 个工具封装成 MCP Server，AI 自主编排分析流程
 - 🧠 **智能降噪**：从几千个函数里精准提炼核心业务函数，过滤库函数噪音
 - 📊 **结构化输出**：自动生成 Markdown 体检报告，不是一坨 C 代码
 - 🔄 **渐进式分析**：三轮工作流，先看全貌再决定深挖哪里
@@ -68,7 +69,7 @@ flowchart TD
 **你只需要说一句话：**
 > "帮我分析一下这个样本，提取 IOC，评估风险，生成攻击链报告。"
 
-**AI 会自主决策并调用 15 个工具，完成完整分析：**
+**AI 会自主决策并调用 17 个工具，完成完整分析：**
 
 | 步骤 | AI 决策 | 调用工具 | 输出 |
 |------|---------|----------|------|
@@ -80,71 +81,10 @@ flowchart TD
 | 6 | 风险评级 | `risk_check` | 🔴 严重（85/100）+ 评分依据 |
 | 7 | 完整报告 | `generate_full_report` | 一键输出 Markdown 体检报告 |
 
-**AI 自主调度示例：**
-
-```mermaid
-flowchart TD
-    Start([用户输入: 分析这个样本]) --> Overview[get_overview<br/>发现高熵+UPX]
-    Overview --> Unpack[unpack_binary<br/>自动脱壳]
-    Unpack --> IOCs[extract_iocs<br/>提取威胁指标]
-    IOCs --> AntiDBG[check_antidbg<br/>检测反调试]
-    AntiDBG --> AttackChain[generate_attack_chain<br/>生成攻击链图]
-    AttackChain --> Risk[risk_check<br/>风险评级]
-    Risk --> Report[generate_full_report<br/>完整报告]
-    
-    style Overview fill:#3498db,color:#fff
-    style Unpack fill:#e74c3c,color:#fff
-    style Report fill:#27ae60,color:#fff
-```
-
-**关键特性：**
-- 🧠 **AI 当指挥官**：不用人一步步调工具，大模型自己决定先干嘛后干嘛
-- 🔗 **路径自动继承**：脱壳后的新路径自动传给下一个工具，不会断链
-- 🛡️ **优雅降级**：缺 YARA 走 strings 模式，缺 UPX 先分析字符串
-- 📊 **结构化输出**：所有结果都是 Markdown/IOC JSON，不是一坨日志
-
----
-
-## 🧊 脱壳能力：从识别到模拟脱壳（v5.0-beta 新升级）
-
-### 三特征交叉验证壳检测
-
-不再单靠字符串匹配，而是三个特征交叉打分，大幅降低误报：
-
-| 特征 | 权重 | 说明 |
-|------|------|------|
-| 字符串特征 | +3 分 | 检测 UPX!/ASPack/Themida 等特征字符串 |
-| 节区名特征 | +3 分 | 检测 .upx0/.vmp 等可疑节区名 |
-| 熵值分析 | +3 分（高熵）/+1 分（中熵） | 熵值 >7.0 大概率加壳 |
-
-**置信度分级：**
-- 🔴 高置信度（≥6 分）：大概率加壳
-- 🟡 中置信度（3-5 分）：可能加壳，建议人工确认
-- 🟢 低置信度（<3 分）：大概率未加壳
-
-### 自动脱 UPX 壳
-
-检测到 UPX 特征后，自动调用 `upx -d` 脱壳，备份原文件，输出脱壳后路径。
-
-### 通用脱壳器原型（unicorn 模拟执行）
-
-**突破：不再只能识别壳，而是能模拟执行脱壳！**
-
-```
-ELF 解析 → 页对齐内存映射 → 加载 ld.so + libc → 模拟执行 → 监控内存写入 → dump 内存
-```
-
-**已实现：**
-- ✅ 64 位 ELF 解析 + 程序头表加载
-- ✅ unicorn 引擎内存映射（页对齐）
-- ✅ 动态链接器 ld.so 加载
-- ✅ libc.so.6 加载
-- ✅ 栈初始化 + 辅助向量（auxv）
-- ✅ 系统调用处理（write/exit/mmap/open/close）
-- ✅ 内存写入监控
-- ✅ 进程内存 dump
-
-**当前状态：** 原型验证可行，ld.so 可模拟执行 1000+ 条指令。后续将完善动态链接和 OEP 检测，实现真正的通用脱壳。
+**全局状态黑板（v5.0-stable 新特性）：**
+- `set_sample`：锁定当前样本，后续工具无需重复传路径
+- `get_context`：随时查看当前分析状态
+- 脱壳成功后，活跃路径自动切换到脱壳后文件，AI 甚至不用知道路径变了
 
 ---
 
@@ -172,7 +112,7 @@ ELF 解析 → 页对齐内存映射 → 加载 ld.so + libc → 模拟执行 �
 ### 级别四：外挂扩展
 | 模块 | 脚本 | 功能 |
 |-----|------|------|
-| 脱壳检测 | `unpacker.sh` | 三特征交叉验证 + 置信度评分 + UPX 自动脱壳 |
+| 脱壳 | `unpacker.sh` | 三特征交叉验证 + UPX 自动脱壳 + JSON 结构化输出 |
 | 通用脱壳 | `generic_unpacker.py` | unicorn 模拟执行 + 内存 dump |
 | YARA 扫描 | `yara_scan.sh` | 内置 UPX / Cobalt Strike / 勒索软件规则 |
 | 熵值分析 | `hash_calc.sh` | 判断是否加壳/加密 |
@@ -189,7 +129,7 @@ ELF 解析 → 页对齐内存映射 → 加载 ld.so + libc → 模拟执行 �
 
 **安装依赖：**
 ```bash
-pip install mcp unicorn
+pip install -r requirements.txt
 ```
 
 **配置 Claude Desktop：**
@@ -211,10 +151,12 @@ pip install mcp unicorn
 
 AI 会自主决策：先概览 → 发现加壳 → 自动脱壳 → YARA 扫描 → 深挖函数 → 输出攻击链报告。
 
-**15 个可调用工具：**
+**17 个可调用工具：**
 | 工具 | 用途 |
 |------|------|
-| `get_overview` | 快速概览（第一步必用） |
+| `set_sample` | 锁定当前分析样本（第一步必用） |
+| `get_context` | 查看当前分析上下文 |
+| `get_overview` | 快速概览 |
 | `quick_check` | 全景检查（含 checksec） |
 | `unpack_binary` | 自动脱 UPX 壳 |
 | `scan_threats` | YARA 恶意特征扫描 |
@@ -225,14 +167,23 @@ AI 会自主决策：先概览 → 发现加壳 → 自动脱壳 → YARA 扫描
 | `check_antidbg` | 反调试检测 |
 | `focus_on_function` | 聚焦深挖特定函数 |
 | `full_analysis` | 完整 Ghidra 反编译 |
-| `generate_full_report` | 一键完整报告（汇总所有检测） |
+| `generate_full_report` | 一键完整报告 |
 | `risk_check` | 快速风险评级 |
 | `extract_iocs` | IOC 统一提取 |
 | `generate_attack_chain` | 攻击链 Mermaid 图 |
 
 ---
 
-### 方式二：命令行模式（v4.2）
+### 方式二：Docker 一键部署
+
+```bash
+docker build -t reverse-toolkit .
+docker run -it reverse-toolkit
+```
+
+---
+
+### 方式三：命令行模式
 
 ### 环境要求
 - Ghidra 12.2（需要 JDK 25）
@@ -252,20 +203,7 @@ bash scripts/focus_func.sh ./target_binary "password"
 
 # 脱壳检测（三特征交叉验证）
 bash scripts/unpacker.sh ./target_binary
-
-# 通用脱壳器（unicorn 模拟）
-python3 scripts/generic_unpacker.py ./target_binary
 ```
-
-### 输出产物
-| 文件 | 内容 |
-|-----|------|
-| `summary.md` | 结构化体检报告（先看这个） |
-| `decompiled/_index.txt` | 函数清单（加权排序，含 [TOP]/[CALLEE] 标记） |
-| `decompiled/_dangerous.txt` | 危险函数列表（三级分级） |
-| `decompiled/<addr>_<name>.c` | 核心函数完整伪代码 |
-| `decompiled/_xref_strings.txt` | 字符串 → 函数交叉引用 |
-| `decompiled/_callgraph.txt` | 调用图 |
 
 ---
 
@@ -285,7 +223,15 @@ python3 scripts/generic_unpacker.py ./target_binary
 |------|--------|--------|------|
 | /bin/ls | 🟠 高危 40/100 | 🟢 低危 0/100 | readelf 方案 + 大小降权 |
 | /usr/bin/python3 | 🟠 高危 40/100 | 🟢 低危 18/100 | 大文件权重降权 |
-| /usr/bin/ssh | ？ | 🟡 中危 27/100 | 真实风险合理评级 |
+
+---
+
+## ✅ 工程化
+
+- **8 个单元测试**：`python test_core.py` 一键跑通
+- **GitHub Actions CI**：每次 push 自动跑测试
+- **Dockerfile**：一键容器化部署
+- **全局状态管理**：AI 不用记路径，工具自动接力
 
 ---
 
@@ -302,45 +248,6 @@ python3 scripts/generic_unpacker.py ./target_binary
 
 ---
 
-## 📁 项目结构
-
-```
-reverse-toolkit/
-├── SKILL.md                    # 主文档
-├── mcp_server.py              # MCP Server v5.0（15 个 AI 工具）
-├── install.sh                 # 一键安装 + 环境检测
-├── scripts/
-│   ├── analyze.sh             # 统一入口 + 环境自检
-│   ├── overview.sh            # 第一轮：快速概览
-│   ├── focus_func.sh          # 第二轮：聚焦深挖
-│   ├── generate_report.py     # 自动报告生成 + 风险评级
-│   ├── ExportDecompiled.java  # Ghidra 反编译导出脚本
-│   ├── backends/
-│   │   ├── ghidra.sh          # Ghidra 后端
-│   │   └── r2.sh              # Radare2 后端
-│   ├── unpacker.sh            # 脱壳检测（三特征交叉验证）
-│   ├── generic_unpacker.py    # 通用脱壳器（unicorn 模拟执行）
-│   ├── yara_scan.sh           # YARA 扫描
-│   ├── hash_calc.sh           # 哈希 + 熵值
-│   ├── strings_extract.sh      # 字符串高级提取
-│   ├── imports_exports.sh      # 导入表/导出表
-│   ├── sections_analysis.sh    # 节区分析
-│   ├── crypto_detect.sh        # 加密算法识别
-│   ├── net_detect.sh           # 网络特征检测
-│   ├── persist_detect.sh       # 持久化检测
-│   ├── antidbg_check.sh       # 反调试检测
-│   ├── bin_diff.sh             # 二进制对比
-│   ├── make_patch.sh           # 补丁生成
-│   ├── debug_info_detect.sh    # 调试信息检测
-│   ├── threads_modules.sh      # 线程与模块
-│   ├── apk_analyze.sh          # APK 分析
-│   ├── firmware_analyze.sh      # 固件分析
-│   └── toolbox.sh              # 工具箱
-└── README.md
-```
-
----
-
 ## ⚠️ 合规声明
 
 **本工具仅用于安全研究和授权测试。**
@@ -353,15 +260,20 @@ reverse-toolkit/
 
 ## 📝 更新日志
 
+### v5.0-stable
+- **全局状态黑板**：set_sample / get_context 工具，AI 不用记路径
+- **JSON 结构化通讯**：shell 脚本输出标准 JSON，Python 层自动解析
+- **脱壳自动接力**：脱壳成功后，活跃路径自动切换
+- **工程化完善**：8 个单元测试 + GitHub Actions CI + Dockerfile
+- MCP 工具升级到 17 个
+
 ### v5.0-beta
 - **脱壳能力升级**：三特征交叉验证壳检测（字符串+节区+熵值，9分制置信度评分）
 - **通用脱壳器原型**：基于 unicorn 引擎模拟执行，加载 ld.so + libc，内存 dump
-- **风险评级误报修复**：改用 readelf 动态符号表 + 文件大小基线降权，大文件误报从 40 分降到 18 分
-- **攻击链误报优化**：从单字符串匹配改为多特征交叉验证（需实际 URL/IP、≥2 个执行 API、≥2 个反调试特征）
-- **超时优化**：默认超时从 300s 提升到 600s，大文件分析不再超时
+- **风险评级误报修复**：改用 readelf 动态符号表 + 文件大小基线降权
+- **攻击链误报优化**：从单字符串匹配改为多特征交叉验证
+- **超时优化**：默认超时从 300s 提升到 600s
 - MCP 工具升级到 15 个：新增报告生成、风险评级、IOC 提取、攻击链可视化
-- AI 自主编排：一句话完成全流程分析，不用手动调工具
-- 一键安装脚本：自动检测环境并安装依赖
 
 ### v5.0-alpha
 - MCP Server 封装：11 个工具暴露给 AI 自主调用
@@ -378,16 +290,6 @@ reverse-toolkit/
 - 大文件截断防爆：每个函数预览 80 行
 - AI 防幻觉守则：6 条规则
 - 环境自检：入口自动检测依赖
-
-### v4.1
-- 优雅降级：Ghidra 超时自动回退概览模式
-- YARA 升级：UPX/Cobalt Strike/勒索软件规则
-- AI 重命名 Prompt
-
-### v4.0
-- 三轮渐进式工作流
-- 外挂扩展：脱壳 + YARA
-- 结构化 Markdown 报告
 
 ---
 
