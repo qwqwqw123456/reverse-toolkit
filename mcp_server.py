@@ -95,13 +95,17 @@ def unpack_binary(file_path: str) -> str:
     """
     检测并自动脱壳（支持 UPX）。
     
+    ⚠️ 重要：仅在 get_overview 或 scan_threats 确认文件包含 UPX 等加壳特征时，才允许调用此工具！
+    无壳文件请勿调用！如果熵值 < 6.0，说明没有加壳，直接跳过此工具。
+    
     使用时机：仅在 get_overview 或 scan_threats 发现高熵（>7.0）或 UPX/加壳特征时调用！
     注意：传入参数必须是原始加壳文件的路径。
     
     返回：
-        脱壳结果 + 脱壳后文件的新路径（后续分析请使用这个新路径！）
+        脱壳结果 + 脱壳后文件的新路径
     
-    重要：脱壳后请使用返回的新文件路径进行后续分析，不要继续用原文件！
+    🔴 关键提醒：脱壳成功后，后续所有分析必须使用返回的新文件路径！
+    绝对不要继续用原文件路径分析！
     """
     if not os.path.exists(file_path):
         return f"[ERROR] 文件不存在: {file_path}"
@@ -111,7 +115,8 @@ def unpack_binary(file_path: str) -> str:
         lines = result.split('\n')
         for line in lines:
             if ".unpacked" in line and ('/' in line or '\\' in line):
-                result += f"\n\n[提示] 脱壳后文件路径: {line.strip()}"
+                unpacked_path = line.strip()
+                result += f"\n\n{'='*50}\n✅ 脱壳完成！后续分析请使用此路径：\n{unpacked_path}\n{'='*50}"
                 break
     return result
 
@@ -289,8 +294,286 @@ def full_analysis(file_path: str, focus_keyword: str = "") -> str:
     return run_script("analyze.sh", args, max_output=15000)
 
 
+@mcp.tool()
+def generate_full_report(file_path: str) -> str:
+    """
+    一键生成完整分析报告：汇总所有快速检测结果，自动评级风险。
+    
+    包含：
+    - 文件指纹 + 熵值 + 壳检测
+    - 字符串自动分类
+    - 导入表 + 危险 API
+    - YARA 威胁扫描
+    - 网络特征 + 加密检测
+    - IOC 指标提取（URL/IP/敏感字符串）
+    - 自动风险评级（低/中/高/严重）+ 评分依据
+    - 后续建议
+    
+    使用时机：想要一份完整的快速体检报告，不需要完整反编译时。
+    特点：不跑 Ghidra，速度快（< 30 秒），输出结构化 Markdown 报告。
+    
+    参数：
+        file_path: 目标二进制文件的绝对路径
+    返回：
+        完整的 Markdown 分析报告 + 风险评级
+    """
+    if not os.path.exists(file_path):
+        return f"[ERROR] 文件不存在: {file_path}"
+    return run_script("generate_report.py", [file_path], max_output=15000)
+
+
+@mcp.tool()
+def risk_check(file_path: str) -> str:
+    """
+    快速风险评级：自动打分并给出低/中/高/严重四级评级。
+    
+    评分依据：
+    - 熵值（高熵 = 可能加壳/加密）
+    - 危险 API 数量（执行/网络/注入类）
+    - 网络特征（socket/connect/URL 下载）
+    - YARA 威胁命中
+    
+    使用时机：快速判断样本的危险程度，决定要不要深入分析。
+    特点：速度极快（< 5 秒），只返回评级和理由。
+    
+    参数：
+        file_path: 目标二进制文件的绝对路径
+    返回：
+        风险等级 + 评分 + 评分依据列表
+    """
+    if not os.path.exists(file_path):
+        return f"[ERROR] 文件不存在: {file_path}"
+    
+    # 调用概览和威胁扫描，然后做简单评分
+    overview = run_script("overview.sh", [file_path], max_output=2000)
+    threats = run_script("yara_scan.sh", [file_path], max_output=1500)
+    imports = run_script("imports_exports.sh", [file_path], max_output=1500)
+    
+    score = 0
+    reasons = []
+    
+    # 熵值
+    import re
+    entropy_match = re.search(r'熵值:\s*([\d.]+)', overview)
+    if entropy_match:
+        entropy = float(entropy_match.group(1))
+        if entropy > 7.0:
+            score += 30
+            reasons.append(f"高熵值 {entropy:.2f}（可能加壳/加密）")
+        elif entropy > 6.0:
+            score += 15
+            reasons.append(f"中熵值 {entropy:.2f}")
+    
+    # 加壳
+    if "UPX!" in overview or "upx" in overview.lower():
+        score += 20
+        reasons.append("检测到 UPX 壳")
+    
+    # 危险 API
+    dangerous = ["system", "execve", "CreateProcess", "CreateRemoteThread", 
+                 "WriteProcessMemory", "WinExec", "popen"]
+    api_count = sum(1 for api in dangerous if api.lower() in imports.lower())
+    if api_count >= 5:
+        score += 30
+        reasons.append(f"检测到 {api_count} 个高危执行 API")
+    elif api_count >= 2:
+        score += 15
+        reasons.append(f"检测到 {api_count} 个高危执行 API")
+    
+    # 网络
+    if "socket" in imports.lower() or "connect" in imports.lower():
+        score += 10
+        reasons.append("包含网络连接 API")
+    
+    # YARA
+    if "critical" in threats.lower():
+        score += 25
+        reasons.append("YARA 检测到严重恶意特征")
+    elif "medium" in threats.lower():
+        score += 10
+        reasons.append("YARA 检测到中等可疑特征")
+    
+    # 评级
+    if score >= 70:
+        level, emoji = "严重", "🔴"
+    elif score >= 40:
+        level, emoji = "高", "🟠"
+    elif score >= 20:
+        level, emoji = "中", "🟡"
+    else:
+        level, emoji = "低", "🟢"
+    
+    result = f"风险评级: {emoji} {level} ({score}/100)\n\n评分依据:\n"
+    for r in reasons:
+        result += f"- {r}\n"
+    
+    return result
+
+
+@mcp.tool()
+def extract_iocs(file_path: str) -> str:
+    """
+    IOC 统一提取：从二进制中提取所有威胁情报指标。
+    
+    提取内容：
+    - URL 地址（http/https/ftp）
+    - IP 地址
+    - 域名
+    - 敏感字符串（密码/密钥/token）
+    - 危险 API
+    
+    使用时机：需要快速提取样本的 IOC 指标，用于威胁情报共享或黑名单。
+    特点：速度快，输出结构化，可直接导入 SIEM 或防火墙。
+    
+    参数：
+        file_path: 目标二进制文件的绝对路径
+    返回：
+        分类整理后的 IOC 列表
+    """
+    if not os.path.exists(file_path):
+        return f"[ERROR] 文件不存在: {file_path}"
+    
+    import re
+    
+    # 提取所有字符串
+    strings_out = run_script("strings_extract.sh", [file_path], max_output=5000)
+    net_out = run_script("net_detect.sh", [file_path], max_output=2000)
+    
+    all_text = strings_out + net_out
+    
+    # URL
+    urls = list(set(re.findall(r'https?://[^\s<>"\']+', all_text)))[:20]
+    
+    # IP
+    ips = list(set(re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', all_text)))[:20]
+    
+    # 敏感字符串
+    sensitive = list(set(re.findall(r'(?:password|passwd|secret|key|token|api_key|private)[^\n]*', all_text, re.I)))[:20]
+    
+    # 危险 API
+    dangerous_apis = ["CreateRemoteThread", "WriteProcessMemory", "CreateProcess", 
+                      "WinExec", "ShellExecute", "system", "popen", "execve",
+                      "connect", "socket", "send", "recv", "URLDownload"]
+    found_apis = [api for api in dangerous_apis if api.lower() in all_text.lower()]
+    
+    result = "=== IOC 指标提取 ===\n\n"
+    result += f"URL ({len(urls)}):\n"
+    result += "\n".join(f"  - {u}" for u in urls) if urls else "  (无)"
+    result += "\n\n"
+    
+    result += f"IP 地址 ({len(ips)}):\n"
+    result += "\n".join(f"  - {ip}" for ip in ips) if ips else "  (无)"
+    result += "\n\n"
+    
+    result += f"敏感字符串 ({len(sensitive)}):\n"
+    result += "\n".join(f"  - {s.strip()}" for s in sensitive) if sensitive else "  (无)"
+    result += "\n\n"
+    
+    result += f"危险 API ({len(found_apis)}):\n"
+    result += "\n".join(f"  - {api}" for api in found_apis) if found_apis else "  (无)"
+    
+    return result
+
+
+@mcp.tool()
+def generate_attack_chain(file_path: str) -> str:
+    """
+    自动生成攻击链 Mermaid 图：根据检测到的特征，还原攻击者行为路径。
+    
+    攻击阶段：
+    - 初始访问（网络特征/文件入侵）
+    - 执行（危险执行 API）
+    - 持久化（注册表/服务/启动项）
+    - 权限提升（反调试/注入）
+    - 命令与控制（网络通信/C2）
+    - 数据窃取（加密/文件操作）
+    
+    使用时机：分析完样本后，想要可视化展示攻击流程时。
+    特点：自动根据检测到的特征生成 Mermaid 流程图，可直接粘贴到 Markdown。
+    
+    参数：
+        file_path: 目标二进制文件的绝对路径
+    返回：
+        Mermaid 格式的攻击链图 + 各阶段检测依据
+    """
+    if not os.path.exists(file_path):
+        return f"[ERROR] 文件不存在: {file_path}"
+    
+    import re
+    
+    # 收集各阶段检测结果
+    overview = run_script("overview.sh", [file_path], max_output=2000)
+    net_out = run_script("net_detect.sh", [file_path], max_output=1500)
+    persist_out = run_script("persist_detect.sh", [file_path], max_output=1500)
+    antidbg_out = run_script("antidbg_check.sh", [file_path], max_output=1500)
+    crypto_out = run_script("crypto_detect.sh", [file_path], max_output=1000)
+    
+    all_text = overview + net_out + persist_out + antidbg_out + crypto_out
+    
+    # 检测各阶段特征
+    stages = []
+    
+    # 初始访问：网络特征
+    has_network = bool(re.search(r'http://|https://|socket|connect', all_text, re.I))
+    if has_network:
+        stages.append(("初始访问", "检测到网络通信特征", "#e74c3c"))
+    
+    # 执行：危险执行 API
+    has_exec = bool(re.search(r'system|execve|CreateProcess|WinExec|ShellExecute', all_text, re.I))
+    if has_exec:
+        stages.append(("执行", "检测到命令执行 API", "#f39c12"))
+    
+    # 持久化
+    has_persist = bool(re.search(r'CurrentVersion\\\\Run|CreateService|StartService|crontab|Startup', all_text, re.I))
+    if has_persist:
+        stages.append(("持久化", "检测到持久化机制", "#9b59b6"))
+    
+    # 权限提升/反调试
+    has_antidbg = bool(re.search(r'IsDebuggerPresent|CheckRemoteDebuggerPresent|CreateToolhelp32Snapshot|VMware|VirtualBox', all_text, re.I))
+    if has_antidbg:
+        stages.append(("防御规避", "检测到反调试/反虚拟机", "#34495e"))
+    
+    # 命令与控制
+    has_c2 = bool(re.search(r'C2|beacon|callback|reverse.*shell|meterpreter|cobalt', all_text, re.I))
+    if has_c2:
+        stages.append(("命令与控制", "检测到 C2 通信特征", "#e67e22"))
+    
+    # 数据窃取/加密
+    has_crypto = bool(re.search(r'AES|RSA|encrypt|decrypt|CryptEncrypt|CryptDecrypt', all_text, re.I))
+    if has_crypto:
+        stages.append(("数据加密", "检测到加密功能", "#16a085"))
+    
+    # 如果没有检测到任何恶意特征
+    if not stages:
+        return "未检测到明显的攻击链特征，样本风险较低。\n\n建议：可进一步深入分析确认。"
+    
+    # 生成 Mermaid 图
+    mermaid = "```mermaid\nflowchart TD\n"
+    mermaid += "    Start([样本分析])\n"
+    
+    prev = "Start"
+    for i, (stage, desc, color) in enumerate(stages):
+        node_id = f"S{i}"
+        mermaid += f'    {node_id}["{stage}<br/>{desc}"]\n'
+        mermaid += f"    {prev} --> {node_id}\n"
+        mermaid += f"    style {node_id} fill:{color},color:#fff\n"
+        prev = node_id
+    
+    mermaid += "```"
+    
+    result = "=== 攻击链可视化 ===\n\n"
+    result += mermaid
+    result += "\n\n---\n\n各阶段检测依据:\n"
+    for stage, desc, _ in stages:
+        result += f"- **{stage}**: {desc}\n"
+    
+    result += f"\n共检测到 {len(stages)} 个攻击阶段。"
+    
+    return result
+
+
 if __name__ == "__main__":
     print("Reverse-Toolkit MCP Server v5.0-alpha 启动中...")
     print(f"脚本目录: {SCRIPTS_DIR}")
-    print(f"工具数量: 11")
+    print(f"工具数量: 15")
     mcp.run()
