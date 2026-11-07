@@ -3,6 +3,7 @@
 > 从 2210 个函数里自动定位漏洞核心，把枯燥的反编译变成可视化的攻击链分析。
 
 ![v4.2-stable](https://img.shields.io/badge/version-v4.2--stable-blue)
+![v5.0-alpha](https://img.shields.io/badge/MCP-v5.0--alpha-orange)
 ![Ghidra](https://img.shields.io/badge/Ghidra-12.2-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
@@ -13,10 +14,12 @@
 Reverse-Toolkit 是一个统一的逆向工程工具包，把 Ghidra 反编译引擎与大语言模型（LLM）结合，实现自动化的二进制分析与漏洞挖掘。
 
 **核心能力：**
+- 🤖 **MCP Agent 模式（v5.0）**：11 个工具封装成 MCP Server，AI 自主编排分析流程
 - 🧠 **智能降噪**：从几千个函数里精准提炼核心业务函数，过滤库函数噪音
 - 📊 **结构化输出**：自动生成 Markdown 体检报告，不是一坨 C 代码
 - 🔄 **渐进式分析**：三轮工作流，先看全貌再决定深挖哪里
 - 🛡️ **防爆防幻觉**：大文件截断 + AI 分析守则，防止 Token 爆炸和胡编乱造
+- 🔽 **优雅降级**：缺 YARA 走 strings 模式，缺 UPX 先分析字符串，环境不完美也能跑
 
 ---
 
@@ -90,6 +93,53 @@ flowchart TD
 
 ## 🛠️ 快速开始
 
+### 方式一：MCP Agent 模式（v5.0 推荐）
+
+一句话让 AI 自动完成全流程分析，不用手动跑脚本。
+
+**安装依赖：**
+```bash
+pip install mcp
+```
+
+**配置 Claude Desktop：**
+
+编辑 `claude_desktop_config.json`：
+```json
+{
+  "mcpServers": {
+    "reverse-toolkit": {
+      "command": "python3",
+      "args": ["/你的路径/reverse-toolkit/mcp_server.py"]
+    }
+  }
+}
+```
+
+重启 Claude Desktop，看到小锤子图标亮起，直接说：
+> 帮我分析这个文件 /tmp/suspicious.bin，看看它是不是恶意的，核心逻辑是什么。
+
+AI 会自主决策：先概览 → 发现加壳 → 自动脱壳 → YARA 扫描 → 深挖函数 → 输出攻击链报告。
+
+**11 个可调用工具：**
+| 工具 | 用途 |
+|------|------|
+| `get_overview` | 快速概览（第一步必用） |
+| `quick_check` | 全景检查（含 checksec） |
+| `unpack_binary` | 自动脱 UPX 壳 |
+| `scan_threats` | YARA 恶意特征扫描 |
+| `get_strings` | 字符串分类提取 |
+| `check_imports` | 导入表+敏感 API |
+| `detect_crypto` | 加密算法识别 |
+| `detect_network` | 网络/C2 特征 |
+| `check_antidbg` | 反调试检测 |
+| `focus_on_function` | 聚焦深挖特定函数 |
+| `full_analysis` | 完整 Ghidra 反编译 |
+
+---
+
+### 方式二：命令行模式（v4.2）
+
 ### 环境要求
 - Ghidra 12.2（需要 JDK 25）
 - Python 3.8+
@@ -149,6 +199,7 @@ bash scripts/focus_func.sh ./target_binary "password"
 ```
 reverse-toolkit/
 ├── SKILL.md                    # 主文档
+├── mcp_server.py              # MCP Server v5.0（11 个 AI 工具）
 ├── scripts/
 │   ├── analyze.sh             # 统一入口 + 环境自检
 │   ├── overview.sh            # 第一轮：快速概览
@@ -190,6 +241,13 @@ reverse-toolkit/
 ---
 
 ## 📝 更新日志
+
+### v5.0-alpha
+- MCP Server 封装：11 个工具暴露给 AI 自主调用
+- Docstring 强警告：防止 AI 乱调工具
+- 输出分级截断：6K/8K/10K/15K 按需喂食
+- 统一错误前缀：[ERROR]/[TIMEOUT]/[EXCEPTION] 触发 AI 纠错
+- 优雅降级：缺依赖自动走手动模式
 
 ### v4.2-stable
 - 黑名单过滤：external/thunk/_开头库函数/LIB_FUNCTIONS
