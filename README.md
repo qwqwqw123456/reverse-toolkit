@@ -5,6 +5,7 @@
 ![v4.2-stable](https://img.shields.io/badge/version-v4.2--stable-blue)
 ![v5.0-beta](https://img.shields.io/badge/MCP-v5.0--beta-orange)
 ![Ghidra](https://img.shields.io/badge/Ghidra-12.2-green)
+![Unicorn](https://img.shields.io/badge/Unicorn-2.1-purple)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
 ---
@@ -22,6 +23,7 @@ Reverse-Toolkit 是一个统一的逆向工程工具包，把 Ghidra 反编译�
 - 🔽 **优雅降级**：缺 YARA 走 strings 模式，缺 UPX 先分析字符串，环境不完美也能跑
 - 🎯 **风险评级**：自动打分低/中/高/严重，附评分依据
 - 📈 **攻击链可视化**：自动生成 Mermaid 攻击流程图
+- 🧊 **通用脱壳器**：基于 unicorn 引擎模拟执行，突破"只能识别不能脱壳"的边界
 
 ---
 
@@ -103,6 +105,49 @@ flowchart TD
 
 ---
 
+## 🧊 脱壳能力：从识别到模拟脱壳（v5.0-beta 新升级）
+
+### 三特征交叉验证壳检测
+
+不再单靠字符串匹配，而是三个特征交叉打分，大幅降低误报：
+
+| 特征 | 权重 | 说明 |
+|------|------|------|
+| 字符串特征 | +3 分 | 检测 UPX!/ASPack/Themida 等特征字符串 |
+| 节区名特征 | +3 分 | 检测 .upx0/.vmp 等可疑节区名 |
+| 熵值分析 | +3 分（高熵）/+1 分（中熵） | 熵值 >7.0 大概率加壳 |
+
+**置信度分级：**
+- 🔴 高置信度（≥6 分）：大概率加壳
+- 🟡 中置信度（3-5 分）：可能加壳，建议人工确认
+- 🟢 低置信度（<3 分）：大概率未加壳
+
+### 自动脱 UPX 壳
+
+检测到 UPX 特征后，自动调用 `upx -d` 脱壳，备份原文件，输出脱壳后路径。
+
+### 通用脱壳器原型（unicorn 模拟执行）
+
+**突破：不再只能识别壳，而是能模拟执行脱壳！**
+
+```
+ELF 解析 → 页对齐内存映射 → 加载 ld.so + libc → 模拟执行 → 监控内存写入 → dump 内存
+```
+
+**已实现：**
+- ✅ 64 位 ELF 解析 + 程序头表加载
+- ✅ unicorn 引擎内存映射（页对齐）
+- ✅ 动态链接器 ld.so 加载
+- ✅ libc.so.6 加载
+- ✅ 栈初始化 + 辅助向量（auxv）
+- ✅ 系统调用处理（write/exit/mmap/open/close）
+- ✅ 内存写入监控
+- ✅ 进程内存 dump
+
+**当前状态：** 原型验证可行，ld.so 可模拟执行 1000+ 条指令。后续将完善动态链接和 OEP 检测，实现真正的通用脱壳。
+
+---
+
 ## 📦 功能特性
 
 ### 级别一：智能降噪
@@ -127,7 +172,8 @@ flowchart TD
 ### 级别四：外挂扩展
 | 模块 | 脚本 | 功能 |
 |-----|------|------|
-| 脱壳 | `unpacker.sh` | 自动识别 UPX 壳并脱壳 |
+| 脱壳检测 | `unpacker.sh` | 三特征交叉验证 + 置信度评分 + UPX 自动脱壳 |
+| 通用脱壳 | `generic_unpacker.py` | unicorn 模拟执行 + 内存 dump |
 | YARA 扫描 | `yara_scan.sh` | 内置 UPX / Cobalt Strike / 勒索软件规则 |
 | 熵值分析 | `hash_calc.sh` | 判断是否加壳/加密 |
 | 反调试检测 | `antidbg_check.sh` | 检测反调试/反虚拟机特征 |
@@ -143,7 +189,7 @@ flowchart TD
 
 **安装依赖：**
 ```bash
-pip install mcp
+pip install mcp unicorn
 ```
 
 **配置 Claude Desktop：**
@@ -203,6 +249,12 @@ bash scripts/analyze.sh ./target_binary ./output_dir
 
 # 聚焦深挖关键词
 bash scripts/focus_func.sh ./target_binary "password"
+
+# 脱壳检测（三特征交叉验证）
+bash scripts/unpacker.sh ./target_binary
+
+# 通用脱壳器（unicorn 模拟）
+python3 scripts/generic_unpacker.py ./target_binary
 ```
 
 ### 输出产物
@@ -226,6 +278,14 @@ bash scripts/focus_func.sh ./target_binary "password"
 | 总函数数 | 2678 | 2210 | 过滤 468 个库函数 |
 | 危险函数数 | 812 | 318 | 降 60% |
 | Top 20 内容 | 全是 free/malloc/strlen | 全是 find_variable/builtin_error 等业务函数 | 核心业务上浮 |
+
+### 风险评级误报修复效果
+
+| 样本 | 修复前 | 修复后 | 说明 |
+|------|--------|--------|------|
+| /bin/ls | 🟠 高危 40/100 | 🟢 低危 0/100 | readelf 方案 + 大小降权 |
+| /usr/bin/python3 | 🟠 高危 40/100 | 🟢 低危 18/100 | 大文件权重降权 |
+| /usr/bin/ssh | ？ | 🟡 中危 27/100 | 真实风险合理评级 |
 
 ---
 
@@ -258,7 +318,8 @@ reverse-toolkit/
 │   ├── backends/
 │   │   ├── ghidra.sh          # Ghidra 后端
 │   │   └── r2.sh              # Radare2 后端
-│   ├── unpacker.sh            # 脱壳分析
+│   ├── unpacker.sh            # 脱壳检测（三特征交叉验证）
+│   ├── generic_unpacker.py    # 通用脱壳器（unicorn 模拟执行）
 │   ├── yara_scan.sh           # YARA 扫描
 │   ├── hash_calc.sh           # 哈希 + 熵值
 │   ├── strings_extract.sh      # 字符串高级提取
@@ -293,11 +354,14 @@ reverse-toolkit/
 ## 📝 更新日志
 
 ### v5.0-beta
+- **脱壳能力升级**：三特征交叉验证壳检测（字符串+节区+熵值，9分制置信度评分）
+- **通用脱壳器原型**：基于 unicorn 引擎模拟执行，加载 ld.so + libc，内存 dump
+- **风险评级误报修复**：改用 readelf 动态符号表 + 文件大小基线降权，大文件误报从 40 分降到 18 分
+- **攻击链误报优化**：从单字符串匹配改为多特征交叉验证（需实际 URL/IP、≥2 个执行 API、≥2 个反调试特征）
+- **超时优化**：默认超时从 300s 提升到 600s，大文件分析不再超时
 - MCP 工具升级到 15 个：新增报告生成、风险评级、IOC 提取、攻击链可视化
 - AI 自主编排：一句话完成全流程分析，不用手动调工具
 - 一键安装脚本：自动检测环境并安装依赖
-- 风险自动评级：低/中/高/严重四级，附评分依据
-- 攻击链自动生成：Mermaid 流程图，6 个攻击阶段检测
 
 ### v5.0-alpha
 - MCP Server 封装：11 个工具暴露给 AI 自主调用
