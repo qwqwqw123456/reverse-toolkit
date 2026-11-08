@@ -68,6 +68,8 @@ public class ExportDecompiled extends GhidraScript {
 	protected void run() throws Exception {
 		String outDirPath = getScriptArgs().length > 0 ? getScriptArgs()[0] : "/tmp/rea_out";
 		int topN = getScriptArgs().length > 1 ? Integer.parseInt(getScriptArgs()[1]) : 20;
+		// v5.1: 第 3 个参数 = 聚焦目标（函数名 / 入口地址 16 进制片段），空串表示不启用
+		String focus = getScriptArgs().length > 2 ? getScriptArgs()[2].trim() : "";
 		File outDir = new File(outDirPath);
 		outDir.mkdirs();
 
@@ -234,6 +236,24 @@ public class ExportDecompiled extends GhidraScript {
 					exportedFuncs.add(callee);
 					toExport.add(callee);
 					funcLayer.put(callee, "[CALLEE]");
+				}
+			}
+		}
+
+		// v5.1: 聚焦导出 —— 目标函数不在 Top N 时强制加入，避免 deep_dive 断链
+		if (!focus.isEmpty()) {
+			String fLow = focus.toLowerCase();
+			String fAddr = fLow.startsWith("0x") ? fLow.substring(2) : fLow;
+			for (Function f : allFuncs) {
+				if (exportedFuncs.contains(f)) continue;
+				boolean nameHit = f.getName().toLowerCase().contains(fLow);
+				boolean addrHit = !fAddr.isEmpty()
+					&& f.getEntryPoint().toString().toLowerCase().contains(fAddr);
+				if (nameHit || addrHit) {
+					exportedFuncs.add(f);
+					toExport.add(f);
+					funcLayer.put(f, "[FOCUS]");
+					println("FOCUS " + f.getName() + " @ " + f.getEntryPoint());
 				}
 			}
 		}

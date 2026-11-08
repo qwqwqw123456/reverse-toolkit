@@ -1,178 +1,202 @@
 ---
 name: reverse-toolkit
-version: 4.2
-updated: 2026-11-07
-description: 统一逆向工程工具包 v4.2 - 智能逆向分析师。四个级别全部落地：智能降噪（加权排序+黑名单过滤）、结构化输出（Markdown体检报告）、渐进式分析（三轮工作流）、外挂扩展（YARA扫描+自动脱UPX）。v4.2 新增：callees递归导出、危险API三级分级、库函数黑名单过滤、大文件截断防爆、AI防幻觉守则。封装 Ghidra / IDA / Hopper / Radare2 多后端，20+ 专项分析模块。合规红线：仅分析用户有权分析的二进制。
+version: 5.1
+updated: 2026-11-08
+description: 统一逆向工程工具包 v5.1 - 具备可信度审计能力的智能逆向分析师。5 个超级原语（set_sample / run_recon / deep_dive / extract_threat_intel / audit_and_report），所有分析结果强制携带 [Evidence: 地址] 函数名与地址；内置 Critic Mode 证据裁判，证据与声明不匹配直接判 FAIL、禁止出报告。封装 Ghidra / IDA / Hopper / Radare2 多后端，智能降噪（Top N + 聚焦强制导出），20+ 专项分析模块。合规红线：仅分析用户有权分析的二进制。
 ---
 
-# 统一逆向工程工具包 (Reverse Toolkit) v4.2
+# 统一逆向工程工具包 (Reverse Toolkit) v5.1
 
-## 四个级别全部落地 ✅
+> v5.1 的核心变化：从"17 个方便脚本"升级为"具备可信度审计能力的分析助理"。
+> 工具做减法（17 → 5），证据做加法（每条结论都能回溯到地址）。
 
-### 级别一：智能降噪 ✅（v4.2 升级）
-- 黑名单过滤：external、thunk、空函数体、_ 开头库函数、LIB_FUNCTIONS 黑名单
-- 危险 API 三级分级：极高危（执行/网络，权重10）、高危（文件/注册表，权重5）、中危（内存操作，权重2）
-- 加权得分排序：得分 = 极高危*10 + 高危*5 + 中危*2 + XREF*1
-- 只导出 Top 20 核心函数 + 它们的直接 callees（1 层深度）
-- **效果**：从"几百个函数堆一起"变成"核心 20 个业务函数精读"，库函数不再淹没核心逻辑
+## 一、v5.1 两个硬约束
 
-### 级别二：结构化输出 ✅（v4.2 升级）
-- 输出 Markdown 体检报告（不是一坨 C 代码）
-- 报告结构：文件指纹 → 核心字符串分类 → 函数统计 → 危险函数 → 交叉引用 → 核心函数伪代码预览
-- 字符串自动分类：URL / IP / 敏感信息 / 执行相关
-- 熵值分析（判断是否加壳，阈值 7.0 对齐业界标准）
-- 大文件截断防爆：每个函数伪代码预览最多 80 行，标注 [代码过长已截断]
-- **效果**：大模型一眼就能抓住重点，不会因 Token 爆炸而截断
+### 1. 证据标签（Evidence Tag）
 
-### 级别三：渐进式分析 ✅
-三轮工作流，不是一次性跑完：
-
-| 轮次 | 脚本 | 做什么 |
-|-----|------|--------|
-| 第一轮 | `overview.sh` | 快速概览：文件指纹 + 熵值 + 壳检测 + 可疑字符串分类（不跑 Ghidra） |
-| 第二轮 | `focus_func.sh` | 聚焦深挖：根据第一轮发现的可疑点，深挖特定函数伪代码 |
-| 第三轮 | `analyze.sh` | 完整分析：如果需要全局视图，跑完整反编译 |
-
-**效果**：先看全貌再决定深挖哪里，不浪费算力
-
-### 级别四：外挂扩展 ✅
-| 外挂 | 脚本 | 功能 |
-|-----|------|------|
-| 查壳 | `unpacker.sh` | 熵值 + 字符串特征 + 节区名检测 |
-| 自动脱壳 | `unpacker.sh` | 检测到 UPX 壳自动脱壳 |
-| YARA 扫描 | `yara_scan.sh` | 内置基础 YARA 规则，检测已知恶意特征（短字符串已加长+fullword边界） |
-| 熵值分析 | `hash_calc.sh` | 熵值计算，判断是否加壳（阈值 7.0） |
-
-**效果**：逆向之前先做体检，知道是什么壳、有没有恶意特征
-
-## v4.1 加固改进 ✅
-
-| 改进 | 说明 |
-|-----|------|
-| 优雅降级 | Ghidra 300s 超时自动回退到概览模式，不让 Agent 卡死 |
-| YARA 升级 | 内置 UPX、Cobalt Strike、勒索软件基础规则 |
-| AI 重命名 Prompt | 伪代码喂给 AI 时，用 Prompt 让它做变量重命名 + 加注释 |
-
-## AI 重命名 Prompt 模板
-
-把 focus_func.sh 的伪代码喂给 AI 时，用这个 System Prompt：
+所有分析工具的输出都强制携带证据标签：
 
 ```text
-你是一个顶级的 C 逆向专家。请分析以下 Ghidra 反编译的伪代码：
-1. 将变量名（如 local_18, param_1）替换为具有业务语义的名称（如 buffer, user_input, packet_len）。
-2. 在关键逻辑上方添加单行注释，解释代码意图。
-3. 输出重构后的 C 代码，并在末尾总结该函数的核心功能。
-注意：如果是内存操作或字符串处理，请格外留意是否存在越界或溢出风险，并在注释中标明。
+[Evidence: 0x401050] verify_password: 检测到密码校验逻辑，调用了 strcmp
 ```
 
-## 模块清单（25 个文件）
+- `0x401050` 是真实虚拟地址（字符串用 VA；映射失败才退化为 `file+0x...`）
+- `verify_password` 是符号名（字符串证据的符号是节区名，如 `.rodata`）
+- 每条证据在台账里有唯一编号 `EV-0001`，结论可以引用编号，也可以引用地址/符号
+- `audit_and_report` 的现场输出会附「证据台账」，模型必须从台账里取证据
 
-### 核心入口
+### 2. System Prompt（必须原样注入客户端）
+
+```text
+你在得出结论时，必须引用返回结果中的 [Evidence] 标签。如果没有找到证据，请直接说"未找到"。
+禁止用函数名、经验或常识补全逻辑；引用不存在的地址 = 幻觉。
+伪代码出现 [代码过长已截断] 时，不得推断截断部分。
+禁止跨证据拼接因果；区分"已核实 / 推断 / 未找到"三档。
+输出最终报告前，必须调用 audit_and_report 自查；FAIL 时禁止输出报告。
+```
+
+> 该 Prompt 已写入 `mcp_server.py` 的 `SYSTEM_PROMPT`，通过 FastMCP 的 `instructions`
+> 参数注入客户端；如果客户端不支持 instructions，请把上面这段手动加入 Agent 的
+> System Prompt。
+
+## 二、5 个超级原语
+
+| # | 工具 | 一句话职责 | 合并了 v5.0 的哪些工具 |
+|---|------|-----------|----------------------|
+| 1 | `set_sample(file_path)` | 锁定样本 + 重置证据台账 | set_sample / get_context |
+| 2 | `run_recon()` | 一次体检：概览 + 字符串 + 导入 + YARA + 风险评级 | get_overview / quick_check / get_strings / check_imports / detect_crypto / risk_check / scan_threats |
+| 3 | `deep_dive(target_function)` | 指定函数深挖：自动脱壳 + 聚焦反编译 + 伪代码截断 | unpack_binary / focus_on_function / full_analysis / generate_full_report |
+| 4 | `extract_threat_intel()` | IOC + YARA + 攻击链打包 | detect_network / extract_iocs / generate_attack_chain / check_antidbg（部分） |
+| 5 | `audit_and_report(claims)` | Critic Mode：证据审计 + Markdown 报告 | 新增（无对应旧工具） |
+
+### 为什么合并
+
+- 工具超过 20 个，模型选错工具的概率显著上升；
+- 旧版每个工具单独返回，模型需要自己拼状态，容易跨工具断片；
+- 合并后每个原语返回"完整可引用的证据块"，模型只需顺序调用，不再猜。
+
+## 三、标准工作流（必须按此顺序）
+
+```text
+set_sample(path)
+      ↓
+run_recon()                     ← 建立证据台账（文件/字符串/导入/YARA/风险）
+      ↓
+deep_dive("可疑函数/地址")       ← 拿到函数级 [Evidence: 0x...]
+      ↓
+extract_threat_intel()          ← 需要 IOC / 攻击链时
+      ↓
+audit_and_report(claims)         ← 强制自查，PASS 才允许输出报告
+```
+
+规则：
+
+1. 没有 `run_recon` 就直接 `audit_and_report`，台账为空，所有结论都会因 AE-2 判 FAIL；
+2. `deep_dive` 返回"未找到"时，禁止编造函数逻辑，按返回的建议换关键词或看 `_index.txt`；
+3. 最终报告只能由 `audit_and_report` 生成，不允许模型手写报告绕过审计。
+
+## 四、Critic Mode：audit_and_report 的 8 条裁判规则
+
+| 规则 | 内容 | 判定 |
+|-----|------|------|
+| AE-1 | 每条结论至少引用 1 个证据（EV 编号 / 地址 / 符号） | 无证据 → FAIL |
+| AE-2 | 引用的编号/地址必须存在于本次证据台账 | 不存在 → FAIL（幻觉） |
+| AE-3 | 结论正文里出现的 0x 地址必须在台账出现过 | 不一致 → FAIL |
+| AE-4 | 结论提到的函数/API 必须在台账或导入表出现 | 查无实据 → FAIL |
+| AE-5 | 证据标记 truncated 时，结论不得用"确认/必然/完整/证明" | 强推断 → WARN |
+| AE-6 | 高危结论不能只靠字符串/YARA 规则名支撑 | 弱证据 → WARN + 降级"待核实" |
+| AE-7 | 多条证据无共同 token 时，不得写成因果句 | 跨源拼接 → WARN |
+| AE-8 | "未找到"结论必须带检索范围证据 | 缺范围 → WARN + 降级 |
+
+FAIL 时工具直接返回违规清单和补救动作（重新取证），**不生成报告**；
+WARN 时报告仍然生成，但对应结论自动降级为"待核实"。
+
+### claims 输入格式
+
+JSON（推荐，便于自动化）：
+
+```json
+[
+  {"id": "C1", "claim": "verify_password 使用 strcmp 比较明文口令", "evidence": ["0x401050", "strcmp"], "confidence": "high"},
+  {"id": "C2", "claim": "样本会连接 10.0.0.5:4444", "evidence": ["EV-0007"], "confidence": "medium"},
+  {"id": "C3", "claim": "未找到反调试逻辑", "evidence": ["0x0"], "confidence": "low"}
+]
+```
+
+Markdown 行（模型直接复制粘贴工具输出时）：
+
+```text
+- verify_password 使用 strcmp 比较明文口令 [Evidence: 0x401050] verify_password
+- 样本会连接 10.0.0.5:4444 [Evidence: 0x402010] .rodata
+```
+
+## 五、v5.0 → v5.1 的保留能力
+
+### 智能降噪（未变）
+- 黑名单过滤：external、thunk、空函数体、`_` 开头库函数、LIB_FUNCTIONS 黑名单
+- 危险 API 三级分级：极高危（执行/网络，权重 10）、高危（文件/注册表，权重 5）、中危（内存操作，权重 2）
+- 加权得分排序：`得分 = 极高危*10 + 高危*5 + 中危*2 + XREF*1`
+- 只导出 Top N 核心函数 + 它们的一层 callees
+- **v5.1 新增 FOCUS 强制导出**：`ExportDecompiled.java` 接收第 3 个参数 focus，
+  即使目标函数不在 Top N，也会被强制反编译导出（解决 `deep_dive` 命中索引却拿不到伪代码）
+
+### 结构化输出（未变）
+- Markdown 体检报告：文件指纹 → 字符串分类 → 函数统计 → 危险函数 → 交叉引用 → 伪代码预览
+- 大文件截断：每个函数最多 80 行（工具参数 `max_lines` 可调），标注 `[代码过长已截断]`
+
+### 渐进式分析（未变，但入口收敛）
+| 轮次 | 旧入口 | v5.1 入口 |
+|-----|--------|-----------|
+| 第一轮 | `overview.sh` | `run_recon()` |
+| 第二轮 | `focus_func.sh` | `deep_dive(target_function)` |
+| 第三轮 | `analyze.sh` | `deep_dive("main")` / 直接跑脚本 |
+
+### 外挂扩展（未变）
+查壳 + 自动脱 UPX（`unpacker.sh`）、YARA 扫描（`yara_scan.sh`）、熵值分析（`hash_calc.sh`）。
+
+## 六、模块清单（25 个脚本，未删除）
+
 | 模块 | 脚本 | 功能 |
 |-----|------|------|
-| 统一入口 | `analyze.sh` | 完整反编译（第三轮） |
-| 概览模式 | `overview.sh` | 快速概览（第一轮） |
-| 聚焦深挖 | `focus_func.sh` | 特定函数深挖（第二轮） |
+| 统一入口 | `analyze.sh` | 完整反编译 |
+| 概览模式 | `overview.sh` | 快速概览 |
+| 聚焦深挖 | `focus_func.sh` | 特定函数深挖（v5.1 传 focus 参数） |
 | Ghidra 后端 | `backends/ghidra.sh` | 智能降噪 + 结构化报告 |
-| Radare2 后端 | `backends/r2.sh` | 轻量级分析（备选） |
-| Ghidra 导出脚本 | `ExportDecompiled.java` | XREF 排序 + 危险标记 + Top N |
+| Ghidra 导出 | `ExportDecompiled.java` | Top N + FOCUS 强制导出 + 危险标记 |
+| 脱壳 | `unpacker.sh` | 壳识别 + 自动脱 UPX |
+| 反调试 | `antidbg_check.sh` | 反调试/反虚拟机检测 |
+| YARA | `yara_scan.sh` | 内置规则扫描 |
+| 导入导出 | `imports_exports.sh` | 敏感 API 检测 |
+| 节区 | `sections_analysis.sh` | 节区与权限 |
+| 加密识别 | `crypto_detect.sh` | AES/RSA/国密常量 |
+| 哈希/熵 | `hash_calc.sh` | MD5/SHA + 熵值 |
+| 字符串 | `strings_extract.sh` | 分类提取 |
+| 二进制对比 | `bin_diff.sh` | 两样本差异 |
+| 补丁 | `make_patch.sh` | 生成补丁 |
+| 网络特征 | `net_detect.sh` | URL/IP/C2 |
+| 持久化 | `persist_detect.sh` | 注册表/服务/启动项 |
+| 调试信息 | `debug_info_detect.sh` | 符号/PDB |
+| 线程模块 | `threads_modules.sh` | 线程 API/依赖 |
+| APK | `apk_analyze.sh` / `apk_info.py` | APK 分析 |
+| 固件 | `firmware_analyze.sh` | 固件提取 |
+| 工具箱 | `toolbox.sh` | 辅助体检 |
+| 报告 | `generate_report.py` | 快速报告 |
 
-### 专项分析模块
-| 模块 | 脚本 | 功能 |
-|-----|------|------|
-| 脱壳分析 v2 | `unpacker.sh` | 壳识别 + 自动脱 UPX + 难度评估 |
-| 反调试检测 | `antidbg_check.sh` | 检测反调试/反虚拟机手段 |
-| YARA 扫描 | `yara_scan.sh` | 内置规则扫描恶意特征 |
-| 导入表/导出表 | `imports_exports.sh` | 导入函数 + 敏感 API 检测 |
-| 节区分析 | `sections_analysis.sh` | 节区列表 + 权限分析 |
-| 加密算法识别 | `crypto_detect.sh` | AES/RSA/哈希常量检测 |
-| 哈希计算 | `hash_calc.sh` | MD5/SHA + 熵值分析 |
-| 字符串高级提取 | `strings_extract.sh` | 分类提取敏感字符串 |
-| 二进制对比 | `bin_diff.sh` | 对比两个二进制差异 |
-| 补丁生成 | `make_patch.sh` | 生成二进制补丁 |
-| 网络特征检测 | `net_detect.sh` | URL/IP/域名/C2 特征 |
-| 持久化检测 | `persist_detect.sh` | 注册表/服务/启动项检测 |
-| 调试信息检测 | `debug_info_detect.sh` | 调试符号/PDB/异常信息 |
-| 线程与模块分析 | `threads_modules.sh` | 线程 API/同步原语/依赖 |
-| APK 分析 | `apk_analyze.sh` | APK 反编译 + 权限分析 |
-| APK 信息提取 | `apk_info.py` | APK 基本信息提取 |
-| 固件分析 | `firmware_analyze.sh` | 固件提取 + 漏洞扫描 |
-| 工具箱 | `toolbox.sh` | 辅助工具集 |
+## 七、AI 分析防幻觉守则（v5.1 强化）
 
-## 推荐工作流（三轮渐进式）
+1. **[Evidence] 即事实**：没有标签的内容只能当线索，不能写进结论；
+2. **[TOP]/[CALLEE]/[FOCUS] 三层含义**：TOP 是加权核心函数，CALLEE 是核心函数的直接子函数，FOCUS 是按关键词强制导出的目标函数；
+3. **截断处理**：看到 `[代码过长已截断]` 直接声明"截断处未取证"，禁止续写；
+4. **反编译失败标记**：`undefined4`、`halt_baddata()`、`FUN_xxx` 不得强行解释；
+5. **库函数不是业务逻辑**：`malloc`/`strcpy`/`strcmp` 只作为行为证据，不作为"核心业务"；
+6. **负面结论也要范围**："未找到"必须说明检索了多少函数、看了哪个目录。
 
-```
-第一步：快速概览
-  bash scripts/overview.sh <目标二进制>
-  → 看文件指纹、熵值、壳检测、可疑字符串
-
-第二步：决定深挖哪里
-  - 如果发现可疑 URL/IP/API → 跑聚焦深挖
-  - 如果发现加壳 → 跑脱壳分析
-  - 如果都正常 → 跑完整分析
-
-第三步：聚焦深挖
-  bash scripts/focus_func.sh <目标二进制> "可疑关键词"
-  → 只提取相关函数的伪代码
-
-或者：完整分析
-  bash scripts/analyze.sh <目标二进制>
-  → 完整反编译 + 结构化报告
-```
-
-## 触发词
-
-逆向 / 反编译 / 扒代码 / 还原逻辑 / 分析二进制 / APK 分析 / 固件分析 / 脱壳分析 / 反调试检测 / 关键函数定位 / 算法还原 / 字符串提取 / 交叉引用 / 加密识别 / 网络特征 / 持久化检测 / 补丁生成 / YARA 扫描 / 渐进式分析
-
-## 输出产物（v4.2）
-
-| 文件 | 内容 |
-|-----|------|
-| `summary.md` | 结构化体检报告（先看这个） |
-| `01_basic.txt` | 文件信息 + 架构 + stripped + 熵值 |
-| `02_strings_all.txt` | 全部字符串 |
-| `strings_url.txt` | URL 分类提取 |
-| `strings_ip.txt` | IP 分类提取 |
-| `strings_secret.txt` | 敏感信息分类提取 |
-| `decompiled/_index.txt` | 函数清单（加权排序，含 [TOP]/[CALLEE]/[DANGEROUS] 标记） |
-| `decompiled/_dangerous.txt` | 危险函数列表（三级分级） |
-| `decompiled/_xref_strings.txt` | 字符串 → 函数交叉引用 |
-| `decompiled/_callgraph.txt` | 调用图 |
-| `decompiled/<addr>_<name>.c` | 核心函数完整伪代码（Top 20 + callees） |
-
-## AI 分析防幻觉守则（v4.2 新增）
-
-读取伪代码时必须遵守以下规则，防止胡编乱造：
-
-1. **[TOP] 标记说明**：带 `[TOP]` 标记的函数是按加权得分排序的核心业务函数（危险 API 权重 + XREF 综合排序），优先分析。
-2. **[CALLEE] 标记说明**：带 `[CALLEE]` 标记的函数是 Top 函数直接调用的子函数，用于理解核心函数的内部实现。
-3. **截断标记处理**：如果看到 `[代码过长已截断]`，绝对不要猜测被截断部分的逻辑。直接声明："该函数后续逻辑因过长被截断，从现有代码看，其核心行为是..."。
-4. **反编译失败标记**：如果代码中出现 `undefined4`、`halt_baddata()`、`FUN_xxx` 等无意义符号，这是反编译失败的特征，不要强行解释。
-5. **证据优先**：所有结论必须基于伪代码中的实际代码，禁止基于函数名或经验猜测逻辑。如果代码里没有证据，就说"未找到相关逻辑"。
-6. **库函数识别**：`malloc`、`free`、`strcpy` 等是标准库函数，不是用户自定义逻辑，不要把它们当成核心分析对象。
-
-## 环境要求
+## 八、环境要求
 
 ### 必需
 - Python 3
 - strings / objdump / file / readelf（系统自带）
 
 ### 可选后端
-- **Ghidra**：设置 `GHIDRA_HOME` 环境变量（推荐）
-- **Radare2**：`r2`（轻量备选）
-- **IDA Pro**：按需安装（商业软件）
-- **Hopper**：macOS 专属，按需安装
+- **Ghidra**：`GHIDRA_HOME`（推荐，v5.1 的 FOCUS 导出依赖它）
+- **JDK 25**：Ghidra 12.x 需要
+- **Radare2** / **IDA Pro** / **Hopper**：按需
 
 ### 可选工具
-- **binwalk**：固件分析
-- **upx**：自动脱 UPX 壳
-- **yara**：恶意特征扫描
+- `binwalk`（固件）、`upx`（脱壳）、`yara`（特征扫描）
 
-## 合规红线
+## 九、合规红线
 
 仅分析用户有权分析的二进制文件。
-不用于：
-- 破解付费软件 / 绕过授权
-- 窃取商业机密
-- 制作恶意软件
-- 任何违法犯罪活动
+不用于：破解付费软件 / 绕过授权 / 窃取商业机密 / 制作恶意软件 / 任何违法犯罪活动。
+
+## 十、验收自检（交付前必须跑）
+
+```bash
+python3 -m pytest -q test_core.py            # 或 python3 test_core.py
+# 手动三步：
+# 1) python3 -c "from mcp_server import *; print(set_sample('/bin/ls'))"
+# 2) print(run_recon())   → 输出里必须每条都有 [Evidence: 0x...]
+# 3) print(audit_and_report('[{"claim":"x","evidence":["0xdeadbeef"]}]'))
+#    → 必须是 [AUDIT_RESULT: FAIL]，且不生成报告
+```

@@ -3,9 +3,9 @@
 > 从 2210 个函数里自动定位漏洞核心，把枯燥的反编译变成可视化的攻击链分析。
 
 ![CI](https://github.com/qwqwqw123456/reverse-toolkit/actions/workflows/ci.yml/badge.svg)
-![Version](https://img.shields.io/badge/version-v5.0--stable-blue)
+![Version](https://img.shields.io/badge/version-v5.1--stable-blue)
 ![Docker](https://img.shields.io/badge/docker-ready-brightgreen)
-![MCP](https://img.shields.io/badge/MCP-17--tools-orange)
+![MCP](https://img.shields.io/badge/MCP-5--primitives-orange)
 ![Ghidra](https://img.shields.io/badge/Ghidra-12.2-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
@@ -16,7 +16,9 @@
 Reverse-Toolkit 是一个统一的逆向工程工具包，把 Ghidra 反编译引擎与大语言模型（LLM）结合，实现自动化的二进制分析与漏洞挖掘。
 
 **核心能力：**
-- 🤖 **MCP Agent 模式（v5.0）**：17 个工具封装成 MCP Server，AI 自主编排分析流程
+- 🤖 **MCP Agent 模式（v5.1）**：5 个超级原语封装成 MCP Server，AI 自主编排分析流程
+- 🔍 **证据可回溯**：每条结论强制携带 `[Evidence: 地址] 符号`，杜绝"函数名像、结论就成立"
+- 🛡️ **Critic Mode 证据裁判**：`audit_and_report` 逐条校验，幻觉直接 FAIL、禁止出报告
 - 🧠 **智能降噪**：从几千个函数里精准提炼核心业务函数，过滤库函数噪音
 - 📊 **结构化输出**：自动生成 Markdown 体检报告，不是一坨 C 代码
 - 🔄 **渐进式分析**：三轮工作流，先看全貌再决定深挖哪里
@@ -64,27 +66,55 @@ flowchart TD
 
 ---
 
-## 🤖 AI 自主编排：一句话分析整个样本（v5.0）
+## 🤖 AI 自主编排：5 个原语 + 证据裁判（v5.1）
 
 **你只需要说一句话：**
 > "帮我分析一下这个样本，提取 IOC，评估风险，生成攻击链报告。"
 
-**AI 会自主决策并调用 17 个工具，完成完整分析：**
+**AI 只用 5 个原语，每一步都留下证据：**
 
-| 步骤 | AI 决策 | 调用工具 | 输出 |
-|------|---------|----------|------|
-| 1 | 先快速侦察 | `get_overview` | 发现高熵 7.81 + UPX 特征 |
-| 2 | 确认加壳，脱壳 | `unpack_binary` | 自动脱 UPX 壳，返回新路径 |
-| 3 | 提取威胁情报 | `extract_iocs` | C2 地址、IP、危险 API 清单 |
-| 4 | 检查防御规避 | `check_antidbg` | 检测到反调试 API |
-| 5 | 生成攻击链 | `generate_attack_chain` | 自动输出 Mermaid 攻击链图 |
-| 6 | 风险评级 | `risk_check` | 🔴 严重（85/100）+ 评分依据 |
-| 7 | 完整报告 | `generate_full_report` | 一键输出 Markdown 体检报告 |
+| 步骤 | 调用原语 | 输出（节选） |
+|------|---------|-------------|
+| 1 | `set_sample(path)` | 锁定样本 + 文件指纹，重置证据台账 |
+| 2 | `run_recon()` | `[Evidence: 0x1976a] .rodata: https://...` + 风险评级 |
+| 3 | `deep_dive("verify_password")` | `[Evidence: 0x101169] verify_password` + 伪代码 |
+| 4 | `extract_threat_intel()` | IOC 表 + Mermaid 攻击链（每条带地址） |
+| 5 | `audit_and_report(claims)` | 证据裁判 PASS 才输出 Markdown 报告 |
 
-**全局状态黑板（v5.0-stable 新特性）：**
-- `set_sample`：锁定当前样本，后续工具无需重复传路径
-- `get_context`：随时查看当前分析状态
-- 脱壳成功后，活跃路径自动切换到脱壳后文件，AI 甚至不用知道路径变了
+**为什么做减法：** 工具超过 20 个，模型选错工具的概率显著上升。v5.1 把 17 个工具合并成 5 个"完整业务原语"，
+每个原语返回可直接引用的证据块；跨工具状态断裂也一并消失（脱壳自动切换 `active_path`，AI 甚至不用知道路径变了）。
+
+**AI 自主调度示例：**
+
+```mermaid
+flowchart TD
+    Start([用户输入: 分析这个样本]) --> Set[set_sample<br/>锁定样本]
+    Set --> Recon[run_recon<br/>字符串/导入/风险]
+    Recon --> Deep[deep_dive<br/>verify_password @0x101169]
+    Deep --> TI[extract_threat_intel<br/>IOC + 攻击链]
+    TI --> Audit{audit_and_report<br/>证据裁判}
+    Audit -->|PASS| Report[Markdown 报告]
+    Audit -->|FAIL| Redo[重新取证 deep_dive]
+
+    style Audit fill:#e74c3c,color:#fff
+    style Report fill:#27ae60,color:#fff
+    style Redo fill:#f39c12,color:#fff
+```
+
+**真实裁判输出（幻觉当场拦住，FAIL 不落盘）：**
+
+```text
+[AUDIT_RESULT: FAIL] 证据链断裂，禁止输出报告。
+违规 2 条：
+- C9 AE-2: 引用 `0xdeadbeef` 不在证据台账（疑似幻觉地址/编号）
+- C9 AE-3: 正文地址 0xdeadbeef 从未在证据台账中出现
+```
+
+**关键特性：**
+- 🧠 **工具做减法**：17 → 5，优先保证 Tool Call 准确率
+- 🔍 **证据做加法**：所有结论强制携带 `[Evidence: 地址] 符号`，可按 EV 编号回溯
+- 🛡️ **红队裁判**：AE-1~AE-8 八条规则，幻觉 FAIL、弱证据自动降级"待核实"
+- 🔗 **路径自动继承**：脱壳后活跃路径自动切换，不会断链
 
 ---
 
@@ -123,7 +153,7 @@ flowchart TD
 
 ## 🛠️ 快速开始
 
-### 方式一：MCP Agent 模式（v5.0 推荐）
+### 方式一：MCP Agent 模式（v5.1 推荐）
 
 一句话让 AI 自动完成全流程分析，不用手动跑脚本。
 
@@ -149,28 +179,18 @@ pip install -r requirements.txt
 重启 Claude Desktop，看到小锤子图标亮起，直接说：
 > 帮我分析这个文件 /tmp/suspicious.bin，看看它是不是恶意的，核心逻辑是什么。
 
-AI 会自主决策：先概览 → 发现加壳 → 自动脱壳 → YARA 扫描 → 深挖函数 → 输出攻击链报告。
+AI 会自主决策：锁定样本 → 综合体检 → 按可疑点深挖函数 → 抽取威胁情报 → **调用证据裁判自查**，PASS 才输出报告。任何一条结论没有 `[Evidence]` 支撑，裁判会直接拦下。
 
-**17 个可调用工具：**
-| 工具 | 用途 |
-|------|------|
-| `set_sample` | 锁定当前分析样本（第一步必用） |
-| `get_context` | 查看当前分析上下文 |
-| `get_overview` | 快速概览 |
-| `quick_check` | 全景检查（含 checksec） |
-| `unpack_binary` | 自动脱 UPX 壳 |
-| `scan_threats` | YARA 恶意特征扫描 |
-| `get_strings` | 字符串分类提取 |
-| `check_imports` | 导入表+敏感 API |
-| `detect_crypto` | 加密算法识别 |
-| `detect_network` | 网络/C2 特征 |
-| `check_antidbg` | 反调试检测 |
-| `focus_on_function` | 聚焦深挖特定函数 |
-| `full_analysis` | 完整 Ghidra 反编译 |
-| `generate_full_report` | 一键完整报告 |
-| `risk_check` | 快速风险评级 |
-| `extract_iocs` | IOC 统一提取 |
-| `generate_attack_chain` | 攻击链 Mermaid 图 |
+**5 个可调用原语（v5.1）：**
+| 原语 | 用途 | 合并了旧版 |
+|------|------|-----------|
+| `set_sample` | 锁定样本 + 重置证据台账 | set_sample / get_context |
+| `run_recon` | 概览 + 字符串 + 导入 + YARA + 风险评级 | get_overview / quick_check / get_strings / check_imports / detect_crypto / detect_network / scan_threats / risk_check |
+| `deep_dive` | 目标函数深挖（自动脱壳 + FOCUS 强制导出 + 截断） | unpack_binary / focus_on_function / full_analysis / generate_full_report |
+| `extract_threat_intel` | IOC + YARA + 攻击链 | extract_iocs / generate_attack_chain / check_antidbg |
+| `audit_and_report` | Critic Mode 证据审计 + Markdown 报告 | 新增 |
+
+> ⚠️ **v5.1 是破坏性升级，不保留旧工具别名。** 如果 prompt / 文档里写过旧工具名，按上表映射替换即可。
 
 ---
 
@@ -228,7 +248,9 @@ bash scripts/unpacker.sh ./target_binary
 
 ## ✅ 工程化
 
-- **8 个单元测试**：`python test_core.py` 一键跑通
+- **14 个单元测试**：`python test_core.py` 一键跑通（含"工具数必须是 5"、"伪造地址/伪造符号必须 FAIL"）
+- **证据台账**：所有结论带 `[Evidence: 地址] 符号`，可按 EV 编号回溯
+- **单文件降噪脚本**：`scripts/ExportDecompiled.java` 可独立配合任意 Ghidra MCP 框架（[说明](docs/ExportDecompiled-standalone.md)）
 - **GitHub Actions CI**：每次 push 自动跑测试
 - **Dockerfile**：一键容器化部署
 - **全局状态管理**：AI 不用记路径，工具自动接力
@@ -246,6 +268,12 @@ bash scripts/unpacker.sh ./target_binary
 5. **证据优先**：所有结论必须基于实际代码，禁止基于函数名猜测
 6. **库函数识别**：malloc/free/strcpy 是标准库，不是核心分析对象
 
+**v5.1 追加三条硬约束：**
+
+7. **证据标签**：结论必须引用返回结果里的 `[Evidence: 地址] 符号`，没有证据就写"未找到"
+8. **出报告前必须自查**：`audit_and_report` 返回 FAIL 时，禁止输出任何报告，先补证据
+9. **裁判只判匹配**：AE-1~AE-8 校验的是"声明与证据是否对得上"，不评价你的分析水平
+
 ---
 
 ## ⚠️ 合规声明
@@ -259,6 +287,13 @@ bash scripts/unpacker.sh ./target_binary
 ---
 
 ## 📝 更新日志
+
+### v5.1-stable
+- **工具做减法**：17 → 5 个超级原语（set_sample / run_recon / deep_dive / extract_threat_intel / audit_and_report），不保留旧别名
+- **证据台账**：所有输出强制 `[Evidence: 地址] 符号`，字符串映射到真实 VA，非装载节如实降级 `file+0x...`
+- **Critic Mode**：8 条 audit_evidence 规则（AE-1~AE-8），幻觉 FAIL 且不落盘报告，弱证据 WARN 降级"待核实"
+- **FOCUS 强制导出**：ExportDecompiled.java 新增第 3 参数，目标函数不在 Top N 也导出
+- **SKILL.md 同步**：要求 AI 输出最终报告前必须调用 audit_and_report
 
 ### v5.0-stable
 - **全局状态黑板**：set_sample / get_context 工具，AI 不用记路径

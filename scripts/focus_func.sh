@@ -60,7 +60,7 @@ if timeout 900 "$GHIDRA_HOME/support/analyzeHeadless" \
   "$GPROJ" REA_Proj \
   -import "$TARGET" \
   -scriptPath "$PARENT_DIR" \
-  -postScript ExportDecompiled.java "$OUTPUT_DIR/decompiled" 50 \
+  -postScript ExportDecompiled.java "$OUTPUT_DIR/decompiled" 50 "$FOCUS" \
   > "$OUTPUT_DIR/03_ghidra.log" 2>&1; then
   echo "  ✅ Ghidra 分析完成"
 else
